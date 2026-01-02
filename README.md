@@ -5,15 +5,17 @@ A minimal Docker-clone implementation in Go using Linux namespaces, cgroups, and
 ## Project Structure
 
 - **`main.go`** - Main implementation with namespace creation, cgroups setup, chroot jail, and command execution
-- **`Makefile`** - Build automation and Alpine Linux rootfs management
+- **`main_test.go`** - Integration tests for container functionality
+- **`Makefile`** - Build automation, testing, and Alpine Linux rootfs management
+- **`.github/workflows/main.yml`** - CI/CD pipeline with automated testing
 - **`rootfs/`** - Alpine Linux mini rootfs directory (auto-downloaded on first run)
 
 ## Prerequisites
 
 - Linux operating system (namespaces and cgroups are Linux-specific)
 - Go 1.16 or later
+- Docker (for setting up Alpine rootfs via `docker export`)
 - Root/sudo access (required for namespace and cgroup operations)
-- `curl` and `tar` (for downloading Alpine rootfs)
 
 ## Installation
 
@@ -28,7 +30,22 @@ go version
 
 ## Usage
 
-### 1. Build the Project
+### 1. Setup Rootfs
+
+Set up the Alpine Linux rootfs (required for chroot-based filesystem isolation):
+
+```bash
+make setup
+```
+
+This will:
+- Pull the Alpine Linux Docker image
+- Create a temporary container
+- Export and extract the filesystem to `rootfs/` using `docker export`
+
+**Note:** The rootfs is necessary because Gocker uses chroot to create filesystem isolation. The rootfs provides a minimal Linux environment inside the container.
+
+### 2. Build the Project
 
 Build the Gocker binary:
 
@@ -38,7 +55,17 @@ make build
 
 This will compile `main.go` and create the `gocker` executable.
 
-### 2. Run a Container
+### 3. Run Tests
+
+Run the integration tests (requires sudo for namespace operations):
+
+```bash
+make test
+```
+
+**Note:** Tests require sudo because Linux namespaces (CLONE_NEWUTS, CLONE_NEWPID, CLONE_NEWNS) and cgroups operations require root privileges for container isolation.
+
+### 4. Run a Container
 
 Run a container with an interactive shell:
 
@@ -48,7 +75,7 @@ make run
 
 This command will:
 - Build the binary if it doesn't exist
-- Automatically download Alpine Linux mini rootfs to `rootfs/` if it doesn't exist
+- Automatically set up Alpine Linux rootfs to `rootfs/` if it doesn't exist
 - Launch the container with `/bin/sh`
 
 You can also run custom commands:
@@ -59,7 +86,7 @@ sudo ./gocker run /bin/ps aux
 sudo ./gocker run /bin/hostname
 ```
 
-### 3. Clean Up
+### 5. Clean Up
 
 Remove the built binary:
 
@@ -106,7 +133,8 @@ The container runs in isolated namespaces:
 - **Filesystem Jail**: Chroot-based filesystem isolation with Alpine Linux rootfs
 - **Proc Filesystem**: Isolated `/proc` mount for container-specific process information
 - **Clean Error Handling**: Graceful error handling with helpful messages
-- **Automatic Rootfs Setup**: Makefile automatically downloads Alpine Linux rootfs
+- **Automated Testing**: Integration tests with CI/CD pipeline
+- **Docker-based Setup**: Uses `docker export` for reliable rootfs creation
 
 ## Architecture Overview
 
@@ -123,6 +151,33 @@ Parent Process (run)
          ├─ Mount /proc
          └─ Execute user command
 ```
+
+## Testing
+
+Gocker includes integration tests that verify container functionality:
+
+```bash
+make test
+```
+
+The test suite includes:
+- **Container Execution Test**: Verifies that commands can be executed inside the container
+- **Hostname Isolation Test**: Verifies UTS namespace isolation
+
+**Important:** Tests must run with sudo because:
+1. Linux namespaces (CLONE_NEWUTS, CLONE_NEWPID, CLONE_NEWNS) require root privileges
+2. Cgroups v2 operations require root to create directories and write limits
+3. Chroot operations require root to change the root filesystem
+4. Mounting /proc requires root privileges
+
+### CI/CD
+
+The project includes a GitHub Actions workflow (`.github/workflows/main.yml`) that:
+- Runs on every push to main/master/develop branches
+- Sets up Go and Docker
+- Runs `make setup` to prepare the rootfs
+- Runs `make test` with sudo privileges
+- Ensures all tests pass before merging
 
 ## Limitations
 
@@ -156,12 +211,32 @@ If you see `cgroup2`, you're using v2. If you see `cgroup`, you may need to enab
 
 ### Rootfs Not Found
 
-The Makefile will automatically download the rootfs on first run. If you encounter issues, manually download:
+The Makefile will automatically set up the rootfs on first run using `make setup`. If you encounter issues:
 
+1. Ensure Docker is installed and running:
+```bash
+docker --version
+docker ps
+```
+
+2. Manually run the setup:
+```bash
+make setup
+```
+
+3. If Docker is not available, you can manually download the rootfs (alternative method):
 ```bash
 mkdir -p rootfs
 curl -L https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/x86_64/alpine-minirootfs-3.19.0-x86_64.tar.gz | tar -xz -C rootfs --strip-components=1
 ```
+
+### Test Failures
+
+If tests fail, ensure:
+- You're running tests with `make test` (which uses sudo automatically)
+- Docker is installed and the daemon is running
+- The rootfs directory exists (run `make setup` first)
+- Your system supports cgroups v2
 
 ## Future Improvements
 
