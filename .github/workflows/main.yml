@@ -1,0 +1,49 @@
+name: CI
+
+# This workflow runs on every push to ensure Gocker builds and tests pass
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.21'
+    
+    - name: Set up Docker
+      # Docker is required for the setup target which uses docker export
+      # to create the Alpine rootfs needed for chroot-based filesystem isolation
+      uses: docker/setup-buildx-action@v3
+    
+    - name: Configure sudo for testing
+      # Gocker requires root privileges to create Linux namespaces (UTS, PID, Mount)
+      # and to manage cgroups. This step ensures sudo is available without password
+      # for the current user, which is required for namespace operations
+      run: |
+        RUNNER_USER=$(whoami)
+        echo "$RUNNER_USER ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/$RUNNER_USER
+        sudo visudo -cf /etc/sudoers.d/$RUNNER_USER
+    
+    - name: Run setup
+      # Setup downloads and extracts Alpine rootfs using docker export
+      # The rootfs is necessary for chroot to create filesystem isolation
+      run: make setup
+    
+    - name: Run tests
+      # Tests must run with sudo because:
+      # 1. Linux namespaces (CLONE_NEWUTS, CLONE_NEWPID, CLONE_NEWNS) require root
+      # 2. Cgroups v2 operations require root to create directories and write limits
+      # 3. Chroot operations require root to change the root filesystem
+      # Without sudo, the container isolation features cannot function
+      run: sudo make test
+
