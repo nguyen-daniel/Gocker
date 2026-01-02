@@ -27,21 +27,23 @@ func TestGockerRun(t *testing.T) {
 		t.Fatalf("rootfs directory not found at %s. Run 'make setup' first.", rootfsPath)
 	}
 
-	// Ensure /bin/true exists in the rootfs (it should in Alpine Linux)
-	truePath := filepath.Join(rootfsPath, "bin/true")
-	if _, err := os.Stat(truePath); os.IsNotExist(err) {
-		t.Fatalf("/bin/true not found in rootfs at %s. Rootfs may be incomplete.", truePath)
+	// Ensure /bin/busybox exists in the rootfs (Alpine Linux uses busybox)
+	// In Alpine, commands like 'true' are available through busybox
+	busyboxPath := filepath.Join(rootfsPath, "bin/busybox")
+	if _, err := os.Stat(busyboxPath); os.IsNotExist(err) {
+		t.Fatalf("/bin/busybox not found in rootfs at %s. Rootfs may be incomplete.", busyboxPath)
 	}
 
-	// Execute gocker run /bin/true
-	// /bin/true is a simple command that exits with status 0
+	// Execute gocker run /bin/busybox true
+	// /bin/busybox true is a simple command that exits with status 0
+	// In Alpine Linux, 'true' is available as a busybox applet, not a standalone binary
 	// This tests that the container can successfully:
 	// - Create namespaces (requires root, so test must run with sudo)
 	// - Set up cgroups
 	// - Chroot into rootfs
 	// - Mount /proc
 	// - Execute commands inside the isolated environment
-	cmd := exec.Command("sudo", binaryPath, "run", "/bin/true")
+	cmd := exec.Command("sudo", binaryPath, "run", "/bin/busybox", "true")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
@@ -53,7 +55,7 @@ func TestGockerRun(t *testing.T) {
 	// Without root access, container isolation cannot be established
 	err := cmd.Run()
 	if err != nil {
-		t.Fatalf("Gocker failed to execute /bin/true in container: %v", err)
+		t.Fatalf("Gocker failed to execute /bin/busybox true in container: %v", err)
 	}
 }
 
@@ -84,6 +86,7 @@ func TestGockerRunWithHostname(t *testing.T) {
 		t.Errorf("Expected hostname '%s', got '%s'", expectedHostname, hostname)
 	}
 }
+
 
 
 

@@ -1,0 +1,48 @@
+# Gocker binary (built executable)
+gocker
+gocker.exe
+gocker.test
+
+# Rootfs directory (can be regenerated with make setup)
+# This is large and doesn't need to be in version control
+rootfs/
+
+# Go build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go workspace file
+go.work
+
+# Test coverage files
+*.coverprofile
+coverage.html
+coverage.out
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.log
+*.bak
+*.cache
+
+# Cgroup directory (created at runtime, system-specific)
+/sys/fs/cgroup/gocker
+
+# Local environment files
+.env
+.env.local
+

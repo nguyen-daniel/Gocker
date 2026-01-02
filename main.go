@@ -41,11 +41,11 @@ func main() {
 }
 
 func run() {
-	fmt.Printf("Running %v as PID %d\n", os.Args[2:], os.Getpid())
-	fmt.Println("Creating isolated namespaces...")
-	fmt.Println("  - UTS namespace (hostname isolation)")
-	fmt.Println("  - PID namespace (process ID isolation)")
-	fmt.Println("  - Mount namespace (filesystem isolation)")
+	fmt.Fprintf(os.Stderr, "Running %v as PID %d\n", os.Args[2:], os.Getpid())
+	fmt.Fprintln(os.Stderr, "Creating isolated namespaces...")
+	fmt.Fprintln(os.Stderr, "  - UTS namespace (hostname isolation)")
+	fmt.Fprintln(os.Stderr, "  - PID namespace (process ID isolation)")
+	fmt.Fprintln(os.Stderr, "  - Mount namespace (filesystem isolation)")
 
 	cmd := exec.Command("/proc/self/exe", append([]string{"child"}, os.Args[2:]...)...)
 	cmd.Stdin = os.Stdin
@@ -59,7 +59,7 @@ func run() {
 }
 
 func limitResources() error {
-	fmt.Println("Setting up cgroups v2 for resource limits...")
+	fmt.Fprintln(os.Stderr, "Setting up cgroups v2 for resource limits...")
 	cgroupPath := "/sys/fs/cgroup/gocker"
 
 	// Create the cgroup directory
@@ -80,29 +80,29 @@ func limitResources() error {
 		return fmt.Errorf("failed to set pids.max: %v", err)
 	}
 
-	fmt.Println("  - Process limit set to 20")
+	fmt.Fprintln(os.Stderr, "  - Process limit set to 20")
 	return nil
 }
 
 func child() {
-	fmt.Printf("Running in child process with PID %d\n", os.Getpid())
+	fmt.Fprintf(os.Stderr, "Running in child process with PID %d\n", os.Getpid())
 
 	// Limit resources using cgroups v2
 	must(limitResources())
 
 	// Set hostname for the container
-	fmt.Println("Setting hostname to 'gocker-container'...")
+	fmt.Fprintln(os.Stderr, "Setting hostname to 'gocker-container'...")
 	must(syscall.Sethostname([]byte("gocker-container")))
 
 	// Create filesystem jail using chroot
-	fmt.Println("Creating filesystem jail with chroot...")
+	fmt.Fprintln(os.Stderr, "Creating filesystem jail with chroot...")
 	must(syscall.Chroot("./rootfs"))
 
 	// Change to root directory after chroot
 	must(os.Chdir("/"))
 
 	// Mount proc filesystem
-	fmt.Println("Mounting proc filesystem...")
+	fmt.Fprintln(os.Stderr, "Mounting proc filesystem...")
 	must(syscall.Mount("proc", "proc", "proc", 0, ""))
 	defer syscall.Unmount("proc", 0)
 
@@ -117,7 +117,7 @@ func child() {
 	}
 
 	// Execute the user's command
-	fmt.Printf("Executing command: %s %v\n", command, args)
+	fmt.Fprintf(os.Stderr, "Executing command: %s %v\n", command, args)
 	cmd := exec.Command(command, args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
