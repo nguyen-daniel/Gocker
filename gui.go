@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -29,6 +30,7 @@ type GockerGUI struct {
 	volumeEntry    *widget.Entry
 	detachedCheck  *widget.Check
 	detailsText    *widget.RichText
+	refreshMutex   sync.Mutex
 }
 
 // NewGockerGUI creates a new GUI instance
@@ -49,18 +51,21 @@ func NewGockerGUI() *GockerGUI {
 // Run starts the GUI application
 func (gui *GockerGUI) Run() {
 	gui.setupUI()
-	gui.refreshContainers()
+	gui.refreshContainersSync() // Initial refresh on main thread
 	
-	// Auto-refresh container list every 2 seconds
-	go func() {
-		ticker := time.NewTicker(2 * time.Second)
-		defer ticker.Stop()
-		for range ticker.C {
-			gui.refreshContainers()
-		}
-	}()
+	// Auto-refresh container list every 2 seconds using goroutine
+	go gui.startAutoRefresh()
 
 	gui.window.ShowAndRun()
+}
+
+// startAutoRefresh runs the auto-refresh loop in a goroutine
+func (gui *GockerGUI) startAutoRefresh() {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		gui.refreshContainersAsync()
+	}
 }
 
 // setupUI creates the main UI layout
@@ -95,6 +100,8 @@ func (gui *GockerGUI) createLeftPanel() fyne.CanvasObject {
 	// Container list
 	gui.containerList = widget.NewList(
 		func() int {
+			gui.refreshMutex.Lock()
+			defer gui.refreshMutex.Unlock()
 			return len(gui.containers)
 		},
 		func() fyne.CanvasObject {
@@ -104,10 +111,14 @@ func (gui *GockerGUI) createLeftPanel() fyne.CanvasObject {
 			)
 		},
 		func(id widget.ListItemID, obj fyne.CanvasObject) {
-			if id >= len(gui.containers) {
+			gui.refreshMutex.Lock()
+			containers := gui.containers
+			gui.refreshMutex.Unlock()
+			
+			if id >= len(containers) {
 				return
 			}
-			cont := gui.containers[id]
+			cont := containers[id]
 			box := obj.(*fyne.Container)
 			labels := box.Objects
 			
@@ -133,9 +144,15 @@ func (gui *GockerGUI) createLeftPanel() fyne.CanvasObject {
 	)
 	
 	gui.containerList.OnSelected = func(id widget.ListItemID) {
-		if id >= 0 && id < len(gui.containers) {
+		gui.refreshMutex.Lock()
+		containers := gui.containers
+		gui.refreshMutex.Unlock()
+		
+		if id >= 0 && id < len(containers) {
+			gui.refreshMutex.Lock()
 			gui.selectedIndex = int(id)
-			gui.showContainerDetails(gui.containers[id])
+			gui.refreshMutex.Unlock()
+			gui.showContainerDetails(containers[id])
 		}
 	}
 	
@@ -260,7 +277,41 @@ func (gui *GockerGUI) createBottomPanel() *fyne.Container {
 	)
 }
 
-// refreshContainers refreshes the container list
+// refreshContainersAsync refreshes the container list from a goroutine (uses fyne.Do)
+func (gui *GockerGUI) refreshContainersAsync() {
+	// Load containers in background (no UI operations here)
+	containers, err := gui.loadAllContainers()
+	if err != nil {
+		// Don't spam error dialogs for background refresh failures
+		return
+	}
+	
+	// Update data with mutex protection, then refresh UI on main thread
+	fyne.Do(func() {
+		gui.refreshMutex.Lock()
+		gui.containers = containers
+		gui.refreshMutex.Unlock()
+		
+		gui.containerList.Refresh()
+	})
+}
+
+// refreshContainersSync refreshes the container list synchronously (for main thread calls)
+func (gui *GockerGUI) refreshContainersSync() {
+	containers, err := gui.loadAllContainers()
+	if err != nil {
+		dialog.ShowError(err, gui.window)
+		return
+	}
+	
+	gui.refreshMutex.Lock()
+	gui.containers = containers
+	gui.refreshMutex.Unlock()
+	
+	gui.containerList.Refresh()
+}
+
+// refreshContainers is for button clicks and other UI-triggered refreshes
 func (gui *GockerGUI) refreshContainers() {
 	containers, err := gui.loadAllContainers()
 	if err != nil {
@@ -268,7 +319,10 @@ func (gui *GockerGUI) refreshContainers() {
 		return
 	}
 	
+	gui.refreshMutex.Lock()
 	gui.containers = containers
+	gui.refreshMutex.Unlock()
+	
 	gui.containerList.Refresh()
 }
 
@@ -407,12 +461,17 @@ func (gui *GockerGUI) createContainer() {
 
 // stopSelectedContainer stops the selected container
 func (gui *GockerGUI) stopSelectedContainer() {
-	if gui.selectedIndex < 0 || gui.selectedIndex >= len(gui.containers) {
+	gui.refreshMutex.Lock()
+	containers := gui.containers
+	selectedIndex := gui.selectedIndex
+	gui.refreshMutex.Unlock()
+	
+	if selectedIndex < 0 || selectedIndex >= len(containers) {
 		dialog.ShowError(fmt.Errorf("please select a container"), gui.window)
 		return
 	}
 	
-	container := gui.containers[gui.selectedIndex]
+	container := containers[selectedIndex]
 	if container.Status != "running" {
 		dialog.ShowError(fmt.Errorf("container is not running"), gui.window)
 		return
@@ -441,12 +500,17 @@ func (gui *GockerGUI) stopSelectedContainer() {
 
 // removeSelectedContainer removes the selected container
 func (gui *GockerGUI) removeSelectedContainer() {
-	if gui.selectedIndex < 0 || gui.selectedIndex >= len(gui.containers) {
+	gui.refreshMutex.Lock()
+	containers := gui.containers
+	selectedIndex := gui.selectedIndex
+	gui.refreshMutex.Unlock()
+	
+	if selectedIndex < 0 || selectedIndex >= len(containers) {
 		dialog.ShowError(fmt.Errorf("please select a container"), gui.window)
 		return
 	}
 	
-	container := gui.containers[gui.selectedIndex]
+	container := containers[selectedIndex]
 	if container.Status == "running" {
 		dialog.ShowError(fmt.Errorf("cannot remove running container. Stop it first"), gui.window)
 		return
