@@ -1,14 +1,34 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
+
+const (
+	stateDir = "/var/lib/gocker"
+	containersDir = "/var/lib/gocker/containers"
+)
+
+// ContainerState represents the state of a container
+type ContainerState struct {
+	ID          string    `json:"id"`
+	PID         int       `json:"pid"`
+	Status      string    `json:"status"` // "running", "stopped", "exited"
+	CreatedAt   time.Time `json:"created_at"`
+	Command     []string  `json:"command"`
+	VethHost    string    `json:"veth_host,omitempty"`
+	LogFile     string    `json:"log_file"`
+	Detached    bool      `json:"detached"`
+}
 
 // must is a helper function that exits the program if an error occurs
 func must(err error) {
@@ -26,7 +46,7 @@ func main() {
 	}
 
 	if len(os.Args) < 2 {
-		fmt.Println("Usage: gocker run <command>")
+		printUsage()
 		os.Exit(1)
 	}
 
@@ -35,14 +55,187 @@ func main() {
 		run()
 	case "child":
 		child()
+	case "ps":
+		listContainers()
+	case "stop":
+		if len(os.Args) < 3 {
+			fmt.Println("Error: container ID required")
+			fmt.Println("Usage: gocker stop <container-id>")
+			os.Exit(1)
+		}
+		stopContainer(os.Args[2])
+	case "rm":
+		if len(os.Args) < 3 {
+			fmt.Println("Error: container ID required")
+			fmt.Println("Usage: gocker rm <container-id>")
+			os.Exit(1)
+		}
+		removeContainer(os.Args[2])
+	case "logs":
+		if len(os.Args) < 3 {
+			fmt.Println("Error: container ID required")
+			fmt.Println("Usage: gocker logs <container-id>")
+			os.Exit(1)
+		}
+		showLogs(os.Args[2])
+	case "gui":
+		// Launch GUI mode
+		gui := NewGockerGUI()
+		gui.Run()
 	default:
 		fmt.Printf("Unknown command: %s\n", os.Args[1])
+		printUsage()
 		os.Exit(1)
 	}
 }
 
+func printUsage() {
+	fmt.Println("Usage: gocker <command> [options]")
+	fmt.Println()
+	fmt.Println("Commands:")
+	fmt.Println("  run     Run a new container")
+	fmt.Println("  ps      List all containers")
+	fmt.Println("  stop    Stop a running container")
+	fmt.Println("  rm      Remove a container")
+	fmt.Println("  logs    Show container logs")
+	fmt.Println("  gui     Launch graphical user interface")
+	fmt.Println()
+	fmt.Println("Run options:")
+	fmt.Println("  --cpu-limit <limit>       CPU limit (e.g., '1' for 1 CPU, '0.5' for 50% of one CPU, 'max' for unlimited)")
+	fmt.Println("  --memory-limit <limit>   Memory limit (e.g., '512M', '1G', 'max' for unlimited)")
+	fmt.Println("  --volume, -v <host:container>  Mount a host directory into the container")
+	fmt.Println("  --detach, -d             Run container in background")
+}
+
+// generateContainerID generates a unique container ID
+func generateContainerID() string {
+	return fmt.Sprintf("%d", time.Now().UnixNano())
+}
+
+// ensureStateDir ensures the state directory exists
+func ensureStateDir() error {
+	if err := os.MkdirAll(containersDir, 0755); err != nil {
+		return fmt.Errorf("failed to create state directory: %v", err)
+	}
+	return nil
+}
+
+// saveContainerState saves container state to disk
+func saveContainerState(state *ContainerState) error {
+	if err := ensureStateDir(); err != nil {
+		return err
+	}
+	
+	stateFile := filepath.Join(containersDir, state.ID+".json")
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal container state: %v", err)
+	}
+	
+	if err := os.WriteFile(stateFile, data, 0644); err != nil {
+		return fmt.Errorf("failed to write container state: %v", err)
+	}
+	
+	return nil
+}
+
+// loadContainerState loads container state from disk
+func loadContainerState(containerID string) (*ContainerState, error) {
+	stateFile := filepath.Join(containersDir, containerID+".json")
+	data, err := os.ReadFile(stateFile)
+	if err != nil {
+		return nil, fmt.Errorf("container not found: %s", containerID)
+	}
+	
+	var state ContainerState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil, fmt.Errorf("failed to parse container state: %v", err)
+	}
+	
+	return &state, nil
+}
+
+// updateContainerStatus updates the container status
+func updateContainerStatus(containerID string, status string) error {
+	state, err := loadContainerState(containerID)
+	if err != nil {
+		return err
+	}
+	
+	state.Status = status
+	return saveContainerState(state)
+}
+
 func run() {
-	fmt.Fprintf(os.Stderr, "Running %v as PID %d\n", os.Args[2:], os.Getpid())
+	// Parse flags for resource limits, volumes, and detached mode
+	// We need to manually parse flags since they come before the command
+	var cpuLimit, memoryLimit string
+	var volumes []string
+	var detached bool
+	args := os.Args[2:]
+	var remainingArgs []string
+	
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--cpu-limit" {
+			if i+1 < len(args) {
+				cpuLimit = args[i+1]
+				i++ // Skip the value
+			}
+		} else if arg == "--memory-limit" {
+			if i+1 < len(args) {
+				memoryLimit = args[i+1]
+				i++ // Skip the value
+			}
+		} else if arg == "--volume" || arg == "-v" {
+			if i+1 < len(args) {
+				volumes = append(volumes, args[i+1])
+				i++ // Skip the value
+			}
+		} else if arg == "--detach" || arg == "-d" {
+			detached = true
+		} else {
+			remainingArgs = append(remainingArgs, arg)
+		}
+	}
+	
+	if len(remainingArgs) == 0 {
+		fmt.Println("Error: command required")
+		fmt.Println("Usage: gocker run [options] <command> [args...]")
+		os.Exit(1)
+	}
+	
+	// Generate container ID
+	containerID := generateContainerID()
+	
+	// Set environment variables to pass limits and volumes to child process
+	if cpuLimit != "" {
+		os.Setenv("GOCKER_CPU_LIMIT", cpuLimit)
+	}
+	if memoryLimit != "" {
+		os.Setenv("GOCKER_MEMORY_LIMIT", memoryLimit)
+	}
+	if len(volumes) > 0 {
+		// Join volumes with a delimiter (|) to pass multiple volumes
+		os.Setenv("GOCKER_VOLUMES", strings.Join(volumes, "|"))
+	}
+	os.Setenv("GOCKER_CONTAINER_ID", containerID)
+
+	// Create log file for container
+	logFile := filepath.Join(stateDir, "logs", containerID+".log")
+	if err := os.MkdirAll(filepath.Dir(logFile), 0755); err != nil {
+		must(fmt.Errorf("failed to create logs directory: %v", err))
+	}
+	
+	logWriter, err := os.Create(logFile)
+	if err != nil {
+		must(fmt.Errorf("failed to create log file: %v", err))
+	}
+	defer logWriter.Close()
+
+	if !detached {
+		fmt.Fprintf(os.Stderr, "Running %v as PID %d\n", remainingArgs, os.Getpid())
+	}
 	fmt.Fprintln(os.Stderr, "Creating isolated namespaces...")
 	fmt.Fprintln(os.Stderr, "  - UTS namespace (hostname isolation)")
 	fmt.Fprintln(os.Stderr, "  - PID namespace (process ID isolation)")
@@ -50,10 +243,19 @@ func run() {
 	fmt.Fprintln(os.Stderr, "  - Network namespace (network isolation)")
 	fmt.Fprintln(os.Stderr, "  - User namespace (user ID isolation)")
 
-	cmd := exec.Command("/proc/self/exe", append([]string{"child"}, os.Args[2:]...)...)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd := exec.Command("/proc/self/exe", append([]string{"child"}, remainingArgs...)...)
+	
+	// In detached mode, redirect stdin/stdout/stderr to log file
+	if detached {
+		cmd.Stdin = nil
+		cmd.Stdout = io.MultiWriter(logWriter, os.Stdout)
+		cmd.Stderr = io.MultiWriter(logWriter, os.Stderr)
+	} else {
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = io.MultiWriter(logWriter, os.Stdout)
+		cmd.Stderr = io.MultiWriter(logWriter, os.Stderr)
+	}
+	
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags: syscall.CLONE_NEWUTS | syscall.CLONE_NEWPID | syscall.CLONE_NEWNS | syscall.CLONE_NEWNET | syscall.CLONE_NEWUSER,
 	}
@@ -83,13 +285,44 @@ func run() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: Failed to set up network: %v\n", err)
 		// Continue even if network setup fails
-	} else {
-		// Ensure cleanup on exit
-		defer cleanupNetwork(vethHost, "")
 	}
 
+	// Save container state
+	state := &ContainerState{
+		ID:        containerID,
+		PID:       childPid,
+		Status:    "running",
+		CreatedAt: time.Now(),
+		Command:   remainingArgs,
+		VethHost:  vethHost,
+		LogFile:   logFile,
+		Detached:  detached,
+	}
+	if err := saveContainerState(state); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: Failed to save container state: %v\n", err)
+	}
+
+	if detached {
+		fmt.Printf("Container started with ID: %s\n", containerID)
+		fmt.Printf("Use 'gocker logs %s' to view logs\n", containerID)
+		return
+	}
+
+	// Cleanup function
+	cleanup := func() {
+		updateContainerStatus(containerID, "exited")
+		if vethHost != "" {
+			cleanupNetwork(vethHost, "")
+		}
+	}
+	defer cleanup()
+
 	// Wait for the command to finish
-	must(cmd.Wait())
+	if err := cmd.Wait(); err != nil {
+		// Command exited with error, but we still need to update status
+		updateContainerStatus(containerID, "exited")
+		os.Exit(cmd.ProcessState.ExitCode())
+	}
 }
 
 // setupNetwork creates a veth pair and configures networking for the container
@@ -256,6 +489,67 @@ func cleanupNetwork(vethHost, vethContainer string) {
 	}
 }
 
+// parseCPULimit parses CPU limit string and returns the cgroup v2 cpu.max format
+// Format: "quota period" in microseconds
+// Examples: "1" -> "100000 100000" (1 CPU), "0.5" -> "50000 100000" (50% of 1 CPU), "max" -> "max"
+func parseCPULimit(cpuLimit string) (string, error) {
+	if cpuLimit == "" || cpuLimit == "max" {
+		return "max", nil
+	}
+	
+	cpu, err := strconv.ParseFloat(cpuLimit, 64)
+	if err != nil {
+		return "", fmt.Errorf("invalid CPU limit format: %v", err)
+	}
+	
+	if cpu <= 0 {
+		return "", fmt.Errorf("CPU limit must be positive")
+	}
+	
+	// cgroup v2 uses microseconds
+	// period is typically 100000 microseconds (100ms)
+	// quota = cpu * period
+	period := 100000
+	quota := int64(float64(period) * cpu)
+	
+	return fmt.Sprintf("%d %d", quota, period), nil
+}
+
+// parseMemoryLimit parses memory limit string and returns bytes as string
+// Examples: "512M" -> "536870912", "1G" -> "1073741824", "max" -> "max"
+func parseMemoryLimit(memoryLimit string) (string, error) {
+	if memoryLimit == "" || memoryLimit == "max" {
+		return "max", nil
+	}
+	
+	memoryLimit = strings.TrimSpace(memoryLimit)
+	memoryLimit = strings.ToUpper(memoryLimit)
+	
+	var multiplier int64 = 1
+	if strings.HasSuffix(memoryLimit, "K") {
+		multiplier = 1024
+		memoryLimit = strings.TrimSuffix(memoryLimit, "K")
+	} else if strings.HasSuffix(memoryLimit, "M") {
+		multiplier = 1024 * 1024
+		memoryLimit = strings.TrimSuffix(memoryLimit, "M")
+	} else if strings.HasSuffix(memoryLimit, "G") {
+		multiplier = 1024 * 1024 * 1024
+		memoryLimit = strings.TrimSuffix(memoryLimit, "G")
+	}
+	
+	value, err := strconv.ParseInt(memoryLimit, 10, 64)
+	if err != nil {
+		return "", fmt.Errorf("invalid memory limit format: %v", err)
+	}
+	
+	if value <= 0 {
+		return "", fmt.Errorf("memory limit must be positive")
+	}
+	
+	bytes := value * multiplier
+	return strconv.FormatInt(bytes, 10), nil
+}
+
 func limitResources() error {
 	fmt.Fprintln(os.Stderr, "Setting up cgroups v2 for resource limits...")
 	cgroupPath := "/sys/fs/cgroup/gocker"
@@ -277,8 +571,48 @@ func limitResources() error {
 	if err := os.WriteFile(pidsMaxPath, []byte("20"), 0644); err != nil {
 		return fmt.Errorf("failed to set pids.max: %v", err)
 	}
-
 	fmt.Fprintln(os.Stderr, "  - Process limit set to 20")
+
+	// Get CPU limit from environment variable
+	cpuLimitStr := os.Getenv("GOCKER_CPU_LIMIT")
+	if cpuLimitStr != "" {
+		cpuMax, err := parseCPULimit(cpuLimitStr)
+		if err != nil {
+			return fmt.Errorf("failed to parse CPU limit: %v", err)
+		}
+		
+		cpuMaxPath := filepath.Join(cgroupPath, "cpu.max")
+		if err := os.WriteFile(cpuMaxPath, []byte(cpuMax), 0644); err != nil {
+			return fmt.Errorf("failed to set cpu.max: %v", err)
+		}
+		
+		if cpuMax == "max" {
+			fmt.Fprintln(os.Stderr, "  - CPU limit: unlimited")
+		} else {
+			fmt.Fprintf(os.Stderr, "  - CPU limit: %s\n", cpuLimitStr)
+		}
+	}
+
+	// Get memory limit from environment variable
+	memoryLimitStr := os.Getenv("GOCKER_MEMORY_LIMIT")
+	if memoryLimitStr != "" {
+		memoryMax, err := parseMemoryLimit(memoryLimitStr)
+		if err != nil {
+			return fmt.Errorf("failed to parse memory limit: %v", err)
+		}
+		
+		memoryMaxPath := filepath.Join(cgroupPath, "memory.max")
+		if err := os.WriteFile(memoryMaxPath, []byte(memoryMax), 0644); err != nil {
+			return fmt.Errorf("failed to set memory.max: %v", err)
+		}
+		
+		if memoryMax == "max" {
+			fmt.Fprintln(os.Stderr, "  - Memory limit: unlimited")
+		} else {
+			fmt.Fprintf(os.Stderr, "  - Memory limit: %s\n", memoryLimitStr)
+		}
+	}
+
 	return nil
 }
 
@@ -304,6 +638,17 @@ func child() {
 	if err := configureContainerNetwork(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: Failed to configure container network: %v\n", err)
 		// Continue even if network configuration fails
+	}
+
+	// Mount volumes before chroot
+	// Volumes must be mounted before chroot so they're accessible in the container
+	volumesStr := os.Getenv("GOCKER_VOLUMES")
+	if volumesStr != "" {
+		fmt.Fprintln(os.Stderr, "Mounting volumes...")
+		if err := mountVolumes(volumesStr); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: Failed to mount volumes: %v\n", err)
+			// Continue even if volume mounting fails
+		}
 	}
 
 	// Create filesystem jail using chroot
@@ -341,6 +686,95 @@ func child() {
 	cmd.Env = os.Environ() // Use the environment with PATH set
 
 	must(cmd.Run())
+}
+
+// mountVolumes mounts host directories into the container rootfs
+// This must be done before chroot so the mounts are accessible in the container
+// Format: "host:container|host2:container2" (multiple volumes separated by |)
+func mountVolumes(volumesStr string) error {
+	volumes := strings.Split(volumesStr, "|")
+	rootfsPath := "./rootfs"
+	
+	for _, volume := range volumes {
+		volume = strings.TrimSpace(volume)
+		if volume == "" {
+			continue
+		}
+		
+		// Parse volume specification: host:container
+		parts := strings.Split(volume, ":")
+		if len(parts) != 2 {
+			return fmt.Errorf("invalid volume format: %s (expected host:container)", volume)
+		}
+		
+		hostPath := strings.TrimSpace(parts[0])
+		containerPath := strings.TrimSpace(parts[1])
+		
+		if hostPath == "" || containerPath == "" {
+			return fmt.Errorf("invalid volume format: %s (host and container paths cannot be empty)", volume)
+		}
+		
+		// Ensure container path is absolute
+		if !filepath.IsAbs(containerPath) {
+			return fmt.Errorf("container path must be absolute: %s", containerPath)
+		}
+		
+		// Check if host path exists
+		hostInfo, err := os.Stat(hostPath)
+		if err != nil {
+			return fmt.Errorf("host path does not exist: %s: %v", hostPath, err)
+		}
+		
+		// Create mount point in rootfs (before chroot)
+		// The mount point path relative to rootfs
+		mountPoint := filepath.Join(rootfsPath, containerPath)
+		
+		// Create parent directories if they don't exist
+		if err := os.MkdirAll(filepath.Dir(mountPoint), 0755); err != nil {
+			return fmt.Errorf("failed to create parent directories for mount point %s: %v", mountPoint, err)
+		}
+		
+		// Create the mount point directory if it doesn't exist
+		// If host path is a directory, create a directory; if it's a file, create parent and touch the file
+		if hostInfo.IsDir() {
+			if err := os.MkdirAll(mountPoint, 0755); err != nil {
+				return fmt.Errorf("failed to create mount point directory %s: %v", mountPoint, err)
+			}
+		} else {
+			// For files, ensure parent directory exists and create the file
+			if err := os.MkdirAll(filepath.Dir(mountPoint), 0755); err != nil {
+				return fmt.Errorf("failed to create parent directory for file mount point %s: %v", mountPoint, err)
+			}
+			// Create an empty file if it doesn't exist
+			if _, err := os.Stat(mountPoint); os.IsNotExist(err) {
+				if f, err := os.Create(mountPoint); err != nil {
+					return fmt.Errorf("failed to create file mount point %s: %v", mountPoint, err)
+				} else {
+					f.Close()
+				}
+			}
+		}
+		
+		// Perform bind mount
+		// MS_BIND: Create a bind mount
+		// MS_REC: Recursive bind mount (mount subtree)
+		// MS_PRIVATE: Make this mount private (don't propagate mount events to parent)
+		flags := syscall.MS_BIND | syscall.MS_REC
+		if err := syscall.Mount(hostPath, mountPoint, "", uintptr(flags), ""); err != nil {
+			return fmt.Errorf("failed to bind mount %s to %s: %v", hostPath, mountPoint, err)
+		}
+		
+		// Set mount propagation to private
+		// This prevents mount/unmount events in the container from affecting the host
+		if err := syscall.Mount("", mountPoint, "", syscall.MS_PRIVATE|syscall.MS_REC, ""); err != nil {
+			// If setting mount propagation fails, log a warning but continue
+			fmt.Fprintf(os.Stderr, "  - Warning: Failed to set mount propagation for %s: %v\n", mountPoint, err)
+		}
+		
+		fmt.Fprintf(os.Stderr, "  - Mounted %s -> %s\n", hostPath, containerPath)
+	}
+	
+	return nil
 }
 
 // configureContainerNetwork sets up the network interface inside the container
@@ -417,5 +851,167 @@ func configureContainerNetwork() error {
 	fmt.Fprintln(os.Stderr, "  - Network configuration complete")
 	
 	return nil
+}
+
+// listContainers lists all containers
+func listContainers() {
+	if err := ensureStateDir(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return
+	}
+	
+	files, err := os.ReadDir(containersDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error reading containers directory: %v\n", err)
+		return
+	}
+	
+	if len(files) == 0 {
+		fmt.Println("No containers found")
+		return
+	}
+	
+	fmt.Printf("%-20s %-10s %-10s %-30s %s\n", "CONTAINER ID", "STATUS", "PID", "CREATED", "COMMAND")
+	fmt.Println(strings.Repeat("-", 100))
+	
+	for _, file := range files {
+		if !strings.HasSuffix(file.Name(), ".json") {
+			continue
+		}
+		
+		containerID := strings.TrimSuffix(file.Name(), ".json")
+		state, err := loadContainerState(containerID)
+		if err != nil {
+			continue
+		}
+		
+		// Check if process is still running
+		status := state.Status
+		if status == "running" {
+			if err := syscall.Kill(state.PID, 0); err != nil {
+				// Process is not running, update status
+				status = "exited"
+				updateContainerStatus(containerID, "exited")
+			}
+		}
+		
+		command := strings.Join(state.Command, " ")
+		if len(command) > 40 {
+			command = command[:37] + "..."
+		}
+		
+		created := state.CreatedAt.Format("2006-01-02 15:04:05")
+		fmt.Printf("%-20s %-10s %-10d %-30s %s\n", containerID[:12], status, state.PID, created, command)
+	}
+}
+
+// stopContainer stops a running container
+func stopContainer(containerID string) {
+	state, err := loadContainerState(containerID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	
+	if state.Status != "running" {
+		fmt.Printf("Container %s is not running (status: %s)\n", containerID[:12], state.Status)
+		return
+	}
+	
+	// Check if process is still running
+	if err := syscall.Kill(state.PID, 0); err != nil {
+		fmt.Printf("Container %s is not running\n", containerID[:12])
+		updateContainerStatus(containerID, "exited")
+		return
+	}
+	
+	// Send SIGTERM to stop the container
+	fmt.Printf("Stopping container %s (PID: %d)...\n", containerID[:12], state.PID)
+	if err := syscall.Kill(state.PID, syscall.SIGTERM); err != nil {
+		fmt.Fprintf(os.Stderr, "Error stopping container: %v\n", err)
+		os.Exit(1)
+	}
+	
+	// Wait a bit for graceful shutdown
+	time.Sleep(2 * time.Second)
+	
+	// Check if still running, send SIGKILL if needed
+	if err := syscall.Kill(state.PID, 0); err == nil {
+		fmt.Println("Container did not stop gracefully, sending SIGKILL...")
+		syscall.Kill(state.PID, syscall.SIGKILL)
+		time.Sleep(500 * time.Millisecond)
+	}
+	
+	// Cleanup network
+	if state.VethHost != "" {
+		cleanupNetwork(state.VethHost, "")
+	}
+	
+	// Update status
+	if err := updateContainerStatus(containerID, "stopped"); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: Failed to update container status: %v\n", err)
+	}
+	
+	fmt.Printf("Container %s stopped\n", containerID[:12])
+}
+
+// removeContainer removes a container
+func removeContainer(containerID string) {
+	state, err := loadContainerState(containerID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	
+	// Check if container is running
+	if state.Status == "running" {
+		if err := syscall.Kill(state.PID, 0); err == nil {
+			fmt.Fprintf(os.Stderr, "Error: Cannot remove running container %s. Stop it first with 'gocker stop %s'\n", containerID[:12], containerID[:12])
+			os.Exit(1)
+		}
+	}
+	
+	// Remove state file
+	stateFile := filepath.Join(containersDir, containerID+".json")
+	if err := os.Remove(stateFile); err != nil {
+		fmt.Fprintf(os.Stderr, "Error removing container state: %v\n", err)
+		os.Exit(1)
+	}
+	
+	// Remove log file if it exists
+	if state.LogFile != "" {
+		if err := os.Remove(state.LogFile); err != nil && !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "Warning: Failed to remove log file: %v\n", err)
+		}
+	}
+	
+	fmt.Printf("Container %s removed\n", containerID[:12])
+}
+
+// showLogs displays container logs
+func showLogs(containerID string) {
+	state, err := loadContainerState(containerID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	
+	if state.LogFile == "" {
+		fmt.Fprintf(os.Stderr, "Error: No log file found for container %s\n", containerID[:12])
+		os.Exit(1)
+	}
+	
+	logFile, err := os.Open(state.LogFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error opening log file: %v\n", err)
+		os.Exit(1)
+	}
+	defer logFile.Close()
+	
+	// Copy log file contents to stdout
+	if _, err := io.Copy(os.Stdout, logFile); err != nil {
+		fmt.Fprintf(os.Stderr, "Error reading log file: %v\n", err)
+		os.Exit(1)
+	}
 }
 

@@ -96,9 +96,85 @@ You can also run custom commands:
    sudo ./gocker run /bin/busybox ip addr show
    sudo ./gocker run /bin/busybox ip route show
    sudo ./gocker run /bin/busybox ping -c 3 10.0.0.1
+   
+   # Resource limits (CPU and memory)
+   sudo ./gocker run --cpu-limit 0.5 --memory-limit 512M /bin/sh
+   sudo ./gocker run --cpu-limit 1 --memory-limit 1G /bin/busybox ls -la /
+   sudo ./gocker run --cpu-limit 2 --memory-limit 2G /bin/busybox ps aux
+   
+   # Volume mounting
+   sudo ./gocker run --volume /tmp:/mnt/tmp /bin/busybox ls -la /mnt/tmp
+   sudo ./gocker run -v /home/user/data:/data /bin/busybox cat /data/file.txt
+   sudo ./gocker run -v /tmp:/tmp --volume /var/log:/var/log /bin/busybox ls -la /tmp
+   
+   # Detached mode (background containers)
+   sudo ./gocker run --detach /bin/busybox sleep 60
+   sudo ./gocker run -d /bin/busybox sh -c "while true; do echo 'Hello'; sleep 5; done"
+   
+   # Container lifecycle management
+   sudo ./gocker ps                    # List all containers
+   sudo ./gocker stop <container-id>   # Stop a running container
+   sudo ./gocker logs <container-id>   # View container logs
+   sudo ./gocker rm <container-id>    # Remove a container
+   
+   # Graphical User Interface
+   sudo ./gocker gui                   # Launch GUI for visual container management
    ```
+   
+### 5. Container Lifecycle Management
 
-### 5. Clean Up
+Gocker supports full container lifecycle management:
+
+```bash
+# List all containers
+sudo ./gocker ps
+
+# Run a container in detached mode (background)
+sudo ./gocker run --detach /bin/busybox sh -c "while true; do echo 'Hello'; sleep 5; done"
+
+# View container logs
+sudo ./gocker logs <container-id>
+
+# Stop a running container
+sudo ./gocker stop <container-id>
+
+# Remove a stopped container
+sudo ./gocker rm <container-id>
+```
+
+**Container State:**
+- Container metadata is stored in `/var/lib/gocker/containers/<container-id>.json`
+- Logs are stored in `/var/lib/gocker/logs/<container-id>.log`
+- Container status can be: `running`, `stopped`, or `exited`
+
+### 6. Graphical User Interface
+
+Gocker includes a graphical user interface built with Fyne for visual container management:
+
+```bash
+# Launch the GUI
+sudo ./gocker gui
+```
+
+**GUI Features:**
+- **Container List**: View all containers with their status (running, stopped, exited)
+- **Container Creation**: Create new containers with a visual form:
+  - Command input
+  - CPU limit setting
+  - Memory limit setting
+  - Volume mount configuration
+  - Detached mode option
+- **Container Details**: View detailed information about selected containers
+- **Log Viewer**: Real-time log viewing for containers
+- **Container Actions**: Stop and remove containers with confirmation dialogs
+- **Auto-refresh**: Container list automatically refreshes every 2 seconds
+
+**GUI Framework:**
+- Built with [Fyne](https://fyne.io) - a cross-platform GUI toolkit for Go
+- Native look and feel on Linux, macOS, and Windows
+- See `GUI_FRAMEWORKS.md` for framework comparison and alternatives
+
+### 7. Clean Up
 
 Remove the built binary:
 
@@ -137,11 +213,24 @@ The container runs in isolated namespaces:
 
 - **Chroot**: Changes the root filesystem to `./rootfs` directory
 - **Proc Mount**: Mounts a fresh `/proc` filesystem inside the container for process visibility
+- **Volume Mounting**: Supports bind mounting host directories into the container using `--volume` or `-v` flag
+  - Format: `--volume /host/path:/container/path` or `-v /host/path:/container/path`
+  - Multiple volumes can be specified: `-v /host1:/container1 -v /host2:/container2`
+  - Volumes are mounted before chroot, making them accessible within the container
+  - Uses bind mounts with private mount propagation to isolate mount events
+  - Supports both directory and file mounts
 
 ### 5. Resource Limits (Cgroups v2)
 
 - Creates a cgroup at `/sys/fs/cgroup/gocker`
-- Limits the container to a maximum of 20 processes
+- Limits the container to a maximum of 20 processes (default)
+- Supports CPU limits via `--cpu-limit` flag:
+  - Format: number (e.g., `1` for 1 CPU, `0.5` for 50% of one CPU) or `max` for unlimited
+  - Configures `cpu.max` controller in cgroup v2
+- Supports memory limits via `--memory-limit` flag:
+  - Format: size with unit (e.g., `512M`, `1G`) or `max` for unlimited
+  - Supports K (kilobytes), M (megabytes), G (gigabytes)
+  - Configures `memory.max` controller in cgroup v2
 - Automatically assigns the container's PID to the cgroup
 
 ### 6. Execution Flow
@@ -159,6 +248,7 @@ The container runs in isolated namespaces:
    - Cgroups for resource limits
    - Network interface configuration (IP address, routing)
    - Hostname isolation
+   - Volume mounts (bind mounts from host to container paths)
    - Chroot filesystem jail
    - Proc filesystem mount
 5. User's command is executed inside the isolated environment
@@ -170,7 +260,13 @@ The container runs in isolated namespaces:
 - **User Namespace Security**: Container root is mapped to unprivileged host user, enhancing security
 - **Network Isolation**: Each container has its own network namespace with veth pair connectivity
 - **Internet Connectivity**: NAT masquerading enables containers to access the internet
-- **Cgroups v2 Integration**: Process limit enforcement (20 max processes)
+- **Cgroups v2 Integration**: Process, CPU, and memory limit enforcement via cgroup v2 controllers
+- **Volume Mounting**: Bind mount host directories into containers with proper mount propagation
+- **Container Lifecycle Management**: Start, stop, list, and remove containers with state persistence
+- **Detached Mode**: Run containers in the background with `--detach` or `-d` flag
+- **Container Logging**: Automatic log file creation for all containers
+- **State Management**: Container metadata stored in `/var/lib/gocker/containers/`
+- **Graphical User Interface**: Visual container management with Fyne-based GUI
 - **Filesystem Jail**: Chroot-based filesystem isolation with Alpine Linux rootfs
 - **Proc Filesystem**: Isolated `/proc` mount for container-specific process information
 - **Automatic Cleanup**: Network interfaces and rules are automatically cleaned up on container exit
@@ -201,9 +297,12 @@ Parent Process (run)
          ├─ Setup cgroups v2 (/sys/fs/cgroup/gocker)
          ├─ Configure network (IP: 10.0.0.2/24, default route)
          ├─ Set hostname (gocker-container)
+         ├─ Mount volumes (bind mount host paths to container paths)
          ├─ Chroot to ./rootfs
          ├─ Mount /proc
          └─ Execute user command
+    │
+    └─ Save container state to /var/lib/gocker/containers/<id>.json
 ```
 
 ## Testing
@@ -225,7 +324,7 @@ The test suite includes:
 4. iptables rules for NAT require root privileges
 5. Cgroups v2 operations require root to create directories and write limits
 6. Chroot operations require root to change the root filesystem
-7. Mounting /proc requires root privileges
+7. Mounting /proc and bind mounting volumes require root privileges
 
 ### CI/CD
 
@@ -241,9 +340,7 @@ The project includes a GitHub Actions workflow (`.github/workflows/main.yml`) th
 This is an educational implementation and has several limitations compared to production container runtimes:
 
 - No image management system
-- No container lifecycle management (start/stop/restart)
-- Limited cgroup controls (only process limits, no CPU/memory limits)
-- No volume mounting
+- Basic cgroup controls (process, CPU, and memory limits via cgroup v2)
 - No container registry support
 - Network setup requires `ip` command and `iptables` (may not work in all environments)
 - User namespace mapping is fixed (maps to UID 1000 when running as root, current user otherwise)
@@ -361,16 +458,43 @@ If tests fail, ensure:
 - Network tools (`ip`, `iptables`) are available on the system
 - User namespaces are enabled in the kernel (`/proc/sys/user/max_user_namespaces > 0`)
 
+### Volume Mounting Issues
+
+If volume mounting doesn't work:
+
+1. **Check that host path exists:**
+   ```bash
+   ls -la /host/path
+   # The path must exist on the host before mounting
+   ```
+
+2. **Verify mount point permissions:**
+   - The container path must be absolute (start with `/`)
+   - Parent directories in rootfs will be created automatically
+   - Ensure you have permissions to access the host path
+
+3. **Check mount propagation:**
+   - Volumes use private mount propagation (MS_PRIVATE)
+   - Mount events in the container won't affect the host
+   - This is by design for security and isolation
+
+4. **Multiple volumes:**
+   ```bash
+   # You can mount multiple volumes
+   sudo ./gocker run -v /tmp:/tmp -v /var/log:/var/log /bin/sh
+   ```
+
 ## Future Improvements
 
 - [x] Add network namespace isolation
 - [x] Implement user namespace for better security
-- [ ] Add more cgroup controls (CPU, memory limits)
-- [ ] Support for volume mounting
+- [x] Add more cgroup controls (CPU, memory limits)
+- [x] Support for volume mounting
+- [x] Container lifecycle management (start, stop, list, remove)
+- [x] Detached mode support
+- [x] Container logging
 - [ ] Container image management
-- [ ] Container lifecycle commands (start, stop, list, remove)
 - [ ] Support for multiple container instances
-- [ ] Logging and debugging features
 - [ ] Support for different base images (not just Alpine)
 - [ ] Network port mapping (similar to Docker's -p flag)
 - [ ] Custom network bridge configuration
