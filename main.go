@@ -14,20 +14,20 @@ import (
 )
 
 const (
-	stateDir = "/var/lib/gocker"
+	stateDir      = "/var/lib/gocker"
 	containersDir = "/var/lib/gocker/containers"
 )
 
 // ContainerState represents the state of a container
 type ContainerState struct {
-	ID          string    `json:"id"`
-	PID         int       `json:"pid"`
-	Status      string    `json:"status"` // "running", "stopped", "exited"
-	CreatedAt   time.Time `json:"created_at"`
-	Command     []string  `json:"command"`
-	VethHost    string    `json:"veth_host,omitempty"`
-	LogFile     string    `json:"log_file"`
-	Detached    bool      `json:"detached"`
+	ID        string    `json:"id"`
+	PID       int       `json:"pid"`
+	Status    string    `json:"status"` // "running", "stopped", "exited"
+	CreatedAt time.Time `json:"created_at"`
+	Command   []string  `json:"command"`
+	VethHost  string    `json:"veth_host,omitempty"`
+	LogFile   string    `json:"log_file"`
+	Detached  bool      `json:"detached"`
 }
 
 // must is a helper function that exits the program if an error occurs
@@ -39,15 +39,20 @@ func must(err error) {
 }
 
 func main() {
-	// Check for root permissions (required for namespace operations)
-	if os.Geteuid() != 0 {
-		fmt.Println("Error: This program must be run with sudo/root permissions")
-		os.Exit(1)
-	}
-
 	if len(os.Args) < 2 {
 		printUsage()
 		os.Exit(1)
+	}
+
+	// Skip root check for "child" and "gui" commands
+	// - "child" runs in a user namespace where it appears as non-root
+	// - "gui" doesn't need root (it will use sudo internally for operations)
+	if os.Args[1] != "child" && os.Args[1] != "gui" {
+		// Check for root permissions (required for namespace operations)
+		if os.Geteuid() != 0 {
+			fmt.Println("Error: This program must be run with sudo/root permissions")
+			os.Exit(1)
+		}
 	}
 
 	switch os.Args[1] {
@@ -80,6 +85,13 @@ func main() {
 		showLogs(os.Args[2])
 	case "gui":
 		// Launch GUI mode
+		// GUI doesn't need root - it will use sudo internally for operations that require it
+		// Check if we're running as root and warn (GUI needs X11 access which root doesn't have)
+		if os.Geteuid() == 0 {
+			fmt.Fprintf(os.Stderr, "Warning: Running GUI as root may cause X11 display issues.\n")
+			fmt.Fprintf(os.Stderr, "Consider running without sudo: ./gocker gui\n")
+			fmt.Fprintf(os.Stderr, "The GUI will use sudo internally for container operations.\n\n")
+		}
 		gui := NewGockerGUI()
 		gui.Run()
 	default:
@@ -125,17 +137,17 @@ func saveContainerState(state *ContainerState) error {
 	if err := ensureStateDir(); err != nil {
 		return err
 	}
-	
+
 	stateFile := filepath.Join(containersDir, state.ID+".json")
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal container state: %v", err)
 	}
-	
+
 	if err := os.WriteFile(stateFile, data, 0644); err != nil {
 		return fmt.Errorf("failed to write container state: %v", err)
 	}
-	
+
 	return nil
 }
 
@@ -146,12 +158,12 @@ func loadContainerState(containerID string) (*ContainerState, error) {
 	if err != nil {
 		return nil, fmt.Errorf("container not found: %s", containerID)
 	}
-	
+
 	var state ContainerState
 	if err := json.Unmarshal(data, &state); err != nil {
 		return nil, fmt.Errorf("failed to parse container state: %v", err)
 	}
-	
+
 	return &state, nil
 }
 
@@ -161,7 +173,7 @@ func updateContainerStatus(containerID string, status string) error {
 	if err != nil {
 		return err
 	}
-	
+
 	state.Status = status
 	return saveContainerState(state)
 }
@@ -174,7 +186,7 @@ func run() {
 	var detached bool
 	args := os.Args[2:]
 	var remainingArgs []string
-	
+
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if arg == "--cpu-limit" {
@@ -198,16 +210,16 @@ func run() {
 			remainingArgs = append(remainingArgs, arg)
 		}
 	}
-	
+
 	if len(remainingArgs) == 0 {
 		fmt.Println("Error: command required")
 		fmt.Println("Usage: gocker run [options] <command> [args...]")
 		os.Exit(1)
 	}
-	
+
 	// Generate container ID
 	containerID := generateContainerID()
-	
+
 	// Set environment variables to pass limits and volumes to child process
 	if cpuLimit != "" {
 		os.Setenv("GOCKER_CPU_LIMIT", cpuLimit)
@@ -226,7 +238,7 @@ func run() {
 	if err := os.MkdirAll(filepath.Dir(logFile), 0755); err != nil {
 		must(fmt.Errorf("failed to create logs directory: %v", err))
 	}
-	
+
 	logWriter, err := os.Create(logFile)
 	if err != nil {
 		must(fmt.Errorf("failed to create log file: %v", err))
@@ -244,7 +256,7 @@ func run() {
 	fmt.Fprintln(os.Stderr, "  - User namespace (user ID isolation)")
 
 	cmd := exec.Command("/proc/self/exe", append([]string{"child"}, remainingArgs...)...)
-	
+
 	// In detached mode, redirect stdin/stdout/stderr to log file
 	if detached {
 		cmd.Stdin = nil
@@ -255,10 +267,20 @@ func run() {
 		cmd.Stdout = io.MultiWriter(logWriter, os.Stdout)
 		cmd.Stderr = io.MultiWriter(logWriter, os.Stderr)
 	}
-	
+
+	// Set up user namespace mappings using Go's built-in support
+	// This ensures mappings are applied before the child process starts
+	// The kernel will give the child full capabilities in the new user namespace
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags: syscall.CLONE_NEWUTS | syscall.CLONE_NEWPID | syscall.CLONE_NEWNS | syscall.CLONE_NEWNET | syscall.CLONE_NEWUSER,
+		UidMappings: []syscall.SysProcIDMap{
+			{ContainerID: 0, HostID: os.Getuid(), Size: 1},
+		},
+		GidMappings: []syscall.SysProcIDMap{
+			{ContainerID: 0, HostID: os.Getgid(), Size: 1},
+		},
 	}
+	fmt.Fprintf(os.Stderr, "  - User namespace: mapping container UID 0 -> host UID %d\n", os.Getuid())
 
 	// Start the command (don't wait for it to finish yet)
 	if err := cmd.Start(); err != nil {
@@ -268,22 +290,33 @@ func run() {
 	// Get the child's PID (in parent namespace, before CLONE_NEWPID takes effect)
 	childPid := cmd.Process.Pid
 
-	// Set up user namespace mappings
-	// Write UID/GID mappings to /proc/<pid>/uid_map and /proc/<pid>/gid_map
-	// This must be done by the parent process (running as root) before the child
-	// performs any privileged operations. The child will block on privileged
-	// operations until the mapping is written.
-	fmt.Fprintln(os.Stderr, "Setting up user namespace mappings...")
-	if err := setupUserNamespace(childPid); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: Failed to set up user namespace: %v\n", err)
-		// Continue even if user namespace setup fails
+	// In interactive mode, redirect parent messages to log file only to avoid
+	// interfering with the child's shell output
+	var parentOutput io.Writer
+	if detached {
+		parentOutput = io.MultiWriter(logWriter, os.Stderr)
+	} else {
+		// In interactive mode, only write to log file to keep shell output clean
+		parentOutput = logWriter
 	}
 
+	fmt.Fprintf(parentOutput, "  - Child PID: %d\n", childPid)
+
 	// Set up network namespace for the container
-	fmt.Fprintln(os.Stderr, "Setting up network namespace...")
-	vethHost, err := setupNetwork(childPid)
+	// In interactive mode, suppress verbose messages to avoid interfering with shell output
+	if !detached {
+		// Suppress network setup messages in interactive mode
+		fmt.Fprintln(logWriter, "Setting up network namespace...")
+	} else {
+		fmt.Fprintln(os.Stderr, "Setting up network namespace...")
+	}
+	vethHost, err := setupNetwork(childPid, !detached)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: Failed to set up network: %v\n", err)
+		if detached {
+			fmt.Fprintf(os.Stderr, "Warning: Failed to set up network: %v\n", err)
+		} else {
+			fmt.Fprintf(logWriter, "Warning: Failed to set up network: %v\n", err)
+		}
 		// Continue even if network setup fails
 	}
 
@@ -299,7 +332,7 @@ func run() {
 		Detached:  detached,
 	}
 	if err := saveContainerState(state); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: Failed to save container state: %v\n", err)
+		fmt.Fprintf(parentOutput, "Warning: Failed to save container state: %v\n", err)
 	}
 
 	if detached {
@@ -327,13 +360,16 @@ func run() {
 
 // setupNetwork creates a veth pair and configures networking for the container
 // Returns the host veth interface name for cleanup
-func setupNetwork(childPid int) (string, error) {
+// quiet: if true, suppresses output messages (for interactive mode)
+func setupNetwork(childPid int, quiet bool) (string, error) {
 	// Generate unique interface names based on child PID
 	vethHost := fmt.Sprintf("veth%d", childPid)
 	vethContainer := fmt.Sprintf("vethc%d", childPid)
 
 	// Create veth pair
-	fmt.Fprintf(os.Stderr, "  - Creating veth pair: %s <-> %s\n", vethHost, vethContainer)
+	if !quiet {
+		fmt.Fprintf(os.Stderr, "  - Creating veth pair: %s <-> %s\n", vethHost, vethContainer)
+	}
 	cmd := exec.Command("ip", "link", "add", vethHost, "type", "veth", "peer", "name", vethContainer)
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("failed to create veth pair: %v", err)
@@ -347,7 +383,9 @@ func setupNetwork(childPid int) (string, error) {
 	}
 
 	// Move container end into the container's network namespace
-	fmt.Fprintf(os.Stderr, "  - Moving %s into container namespace\n", vethContainer)
+	if !quiet {
+		fmt.Fprintf(os.Stderr, "  - Moving %s into container namespace\n", vethContainer)
+	}
 	netnsPath := fmt.Sprintf("/proc/%d/ns/net", childPid)
 	cmd = exec.Command("ip", "link", "set", vethContainer, "netns", netnsPath)
 	if err := cmd.Run(); err != nil {
@@ -376,7 +414,9 @@ func setupNetwork(childPid int) (string, error) {
 		fmt.Fprintf(os.Stderr, "  - Warning: Could not determine default interface: %v\n", err)
 		fmt.Fprintf(os.Stderr, "  - NAT will not be configured. Container will have local network only.\n")
 	} else {
-		fmt.Fprintf(os.Stderr, "  - Setting up NAT via %s for internet connectivity\n", defaultInterface)
+		if !quiet {
+			fmt.Fprintf(os.Stderr, "  - Setting up NAT via %s for internet connectivity\n", defaultInterface)
+		}
 		// Enable NAT masquerading
 		cmd = exec.Command("iptables", "-t", "nat", "-A", "POSTROUTING", "-s", "10.0.0.0/24", "-o", defaultInterface, "-j", "MASQUERADE")
 		if err := cmd.Run(); err != nil {
@@ -394,7 +434,10 @@ func setupNetwork(childPid int) (string, error) {
 		}
 	}
 
-	fmt.Fprintln(os.Stderr, "  - Network setup complete")
+	// Only print completion message if not in quiet mode (interactive)
+	if !quiet {
+		fmt.Fprintln(os.Stderr, "  - Network setup complete")
+	}
 	return vethHost, nil
 }
 
@@ -423,45 +466,51 @@ func getDefaultInterface() (string, error) {
 }
 
 // setupUserNamespace writes UID/GID mappings to /proc/<pid>/uid_map and /proc/<pid>/gid_map
-// This maps container UID 0 (root) to an unprivileged user on the host for security
-// The mapping files can only be written once, so we need to write all mappings at once
+// The mapping format is: container_id host_id count
+// This means container UID X maps to host UID Y
+// The child process inherits the parent's UID (0 when running as root), so we need to
+// map that host UID to container UID 0 for the child to appear as root in the container.
 func setupUserNamespace(childPid int) error {
-	// Determine the host UID/GID to map container root (0) to
-	// If running as root, map to UID 1000 (typical first user)
-	// Otherwise, map to the current user
+	// Get the current UID/GID - this is what the child process inherited
 	hostUID := os.Getuid()
 	hostGID := os.Getgid()
-	
-	if hostUID == 0 {
-		// Running as root - map container root to unprivileged user (1000)
-		// This provides security: container root is not host root
-		hostUID = 1000
-		hostGID = 1000
-		fmt.Fprintf(os.Stderr, "  - Mapping container root (UID 0) to host UID %d (unprivileged)\n", hostUID)
-	} else {
-		fmt.Fprintf(os.Stderr, "  - Mapping container root (UID 0) to host UID %d\n", hostUID)
+
+	fmt.Fprintf(os.Stderr, "  - Mapping container root (UID 0) to host UID %d\n", hostUID)
+
+	// Disable setgroups before writing gid_map (required for user namespaces)
+	// This prevents the child from changing its supplementary groups
+	setgroupsPath := fmt.Sprintf("/proc/%d/setgroups", childPid)
+	if err := os.WriteFile(setgroupsPath, []byte("deny\n"), 0644); err != nil {
+		// setgroups might not exist on all systems, continue if it fails
+		fmt.Fprintf(os.Stderr, "  - Note: Could not disable setgroups: %v\n", err)
 	}
 
-	// Write UID mapping: container UID 0 -> host UID (hostUID)
+	// Write GID mapping: container GID 0 -> host GID
 	// Format: container_id host_id count
-	// We map a range to allow for system users in the container
-	// Map container UIDs 0-1000 to host UIDs hostUID to hostUID+1000
-	uidMapPath := fmt.Sprintf("/proc/%d/uid_map", childPid)
-	uidMap := fmt.Sprintf("0 %d 1001\n", hostUID)
-	if err := os.WriteFile(uidMapPath, []byte(uidMap), 0644); err != nil {
-		return fmt.Errorf("failed to write uid_map: %v", err)
-	}
-
-	// Write GID mapping: container GID 0 -> host GID (hostGID)
-	// Map container GIDs 0-1000 to host GIDs hostGID to hostGID+1000
 	gidMapPath := fmt.Sprintf("/proc/%d/gid_map", childPid)
-	gidMap := fmt.Sprintf("0 %d 1001\n", hostGID)
+	gidMap := fmt.Sprintf("0 %d 1\n", hostGID)
 	if err := os.WriteFile(gidMapPath, []byte(gidMap), 0644); err != nil {
 		return fmt.Errorf("failed to write gid_map: %v", err)
 	}
 
+	// Write UID mapping: container UID 0 -> host UID
+	// Format: container_id host_id count
+	// The child inherited host UID 0 (root), so we map container 0 to host 0
+	// This allows the child to appear as UID 0 in the container namespace
+	uidMapPath := fmt.Sprintf("/proc/%d/uid_map", childPid)
+	uidMap := fmt.Sprintf("0 %d 1\n", hostUID)
+	if err := os.WriteFile(uidMapPath, []byte(uidMap), 0644); err != nil {
+		return fmt.Errorf("failed to write uid_map: %v", err)
+	}
+
+	// Verify the mapping was written correctly
+	if data, err := os.ReadFile(uidMapPath); err == nil {
+		fmt.Fprintf(os.Stderr, "  - Verified uid_map: %s", string(data))
+	} else {
+		fmt.Fprintf(os.Stderr, "  - Warning: Could not verify uid_map: %v\n", err)
+	}
+
 	fmt.Fprintf(os.Stderr, "  - User namespace mapping complete (container root -> host UID %d)\n", hostUID)
-	fmt.Fprintf(os.Stderr, "  - Mapped container UIDs 0-1000 to host UIDs %d-%d\n", hostUID, hostUID+1000)
 	return nil
 }
 
@@ -472,7 +521,7 @@ func cleanupNetwork(vethHost, vethContainer string) {
 	}
 
 	fmt.Fprintf(os.Stderr, "Cleaning up network interfaces...\n")
-	
+
 	// Remove iptables rules (best effort, may fail if already removed)
 	defaultInterface, err := getDefaultInterface()
 	if err == nil {
@@ -496,22 +545,22 @@ func parseCPULimit(cpuLimit string) (string, error) {
 	if cpuLimit == "" || cpuLimit == "max" {
 		return "max", nil
 	}
-	
+
 	cpu, err := strconv.ParseFloat(cpuLimit, 64)
 	if err != nil {
 		return "", fmt.Errorf("invalid CPU limit format: %v", err)
 	}
-	
+
 	if cpu <= 0 {
 		return "", fmt.Errorf("CPU limit must be positive")
 	}
-	
+
 	// cgroup v2 uses microseconds
 	// period is typically 100000 microseconds (100ms)
 	// quota = cpu * period
 	period := 100000
 	quota := int64(float64(period) * cpu)
-	
+
 	return fmt.Sprintf("%d %d", quota, period), nil
 }
 
@@ -521,10 +570,10 @@ func parseMemoryLimit(memoryLimit string) (string, error) {
 	if memoryLimit == "" || memoryLimit == "max" {
 		return "max", nil
 	}
-	
+
 	memoryLimit = strings.TrimSpace(memoryLimit)
 	memoryLimit = strings.ToUpper(memoryLimit)
-	
+
 	var multiplier int64 = 1
 	if strings.HasSuffix(memoryLimit, "K") {
 		multiplier = 1024
@@ -536,16 +585,16 @@ func parseMemoryLimit(memoryLimit string) (string, error) {
 		multiplier = 1024 * 1024 * 1024
 		memoryLimit = strings.TrimSuffix(memoryLimit, "G")
 	}
-	
+
 	value, err := strconv.ParseInt(memoryLimit, 10, 64)
 	if err != nil {
 		return "", fmt.Errorf("invalid memory limit format: %v", err)
 	}
-	
+
 	if value <= 0 {
 		return "", fmt.Errorf("memory limit must be positive")
 	}
-	
+
 	bytes := value * multiplier
 	return strconv.FormatInt(bytes, 10), nil
 }
@@ -580,12 +629,12 @@ func limitResources() error {
 		if err != nil {
 			return fmt.Errorf("failed to parse CPU limit: %v", err)
 		}
-		
+
 		cpuMaxPath := filepath.Join(cgroupPath, "cpu.max")
 		if err := os.WriteFile(cpuMaxPath, []byte(cpuMax), 0644); err != nil {
 			return fmt.Errorf("failed to set cpu.max: %v", err)
 		}
-		
+
 		if cpuMax == "max" {
 			fmt.Fprintln(os.Stderr, "  - CPU limit: unlimited")
 		} else {
@@ -600,12 +649,12 @@ func limitResources() error {
 		if err != nil {
 			return fmt.Errorf("failed to parse memory limit: %v", err)
 		}
-		
+
 		memoryMaxPath := filepath.Join(cgroupPath, "memory.max")
 		if err := os.WriteFile(memoryMaxPath, []byte(memoryMax), 0644); err != nil {
 			return fmt.Errorf("failed to set memory.max: %v", err)
 		}
-		
+
 		if memoryMax == "max" {
 			fmt.Fprintln(os.Stderr, "  - Memory limit: unlimited")
 		} else {
@@ -618,12 +667,12 @@ func limitResources() error {
 
 func child() {
 	fmt.Fprintf(os.Stderr, "Running in child process with PID %d\n", os.Getpid())
-	
-	// Verify user namespace mapping
-	// In the container namespace, we should see ourselves as UID 0 (root)
-	containerUID := os.Getuid()
-	containerGID := os.Getgid()
-	fmt.Fprintf(os.Stderr, "Container UID: %d, GID: %d (root in container namespace)\n", containerUID, containerGID)
+
+	// User namespace mapping is already applied by the kernel via SysProcAttr.UidMappings/GidMappings
+	// The child process starts with the correct UID/GID and full capabilities in the user namespace
+	containerUID := syscall.Getuid()
+	containerGID := syscall.Getgid()
+	fmt.Fprintf(os.Stderr, "Container UID: %d, GID: %d\n", containerUID, containerGID)
 
 	// Limit resources using cgroups v2
 	must(limitResources())
@@ -685,6 +734,13 @@ func child() {
 	cmd.Stderr = os.Stderr
 	cmd.Env = os.Environ() // Use the environment with PATH set
 
+	// For interactive shells, ensure we have a TTY
+	// This helps with prompt display and input handling
+	if command == "/bin/sh" && len(args) == 0 {
+		// Force interactive mode
+		cmd.Args = []string{command, "-i"}
+	}
+
 	must(cmd.Run())
 }
 
@@ -694,46 +750,46 @@ func child() {
 func mountVolumes(volumesStr string) error {
 	volumes := strings.Split(volumesStr, "|")
 	rootfsPath := "./rootfs"
-	
+
 	for _, volume := range volumes {
 		volume = strings.TrimSpace(volume)
 		if volume == "" {
 			continue
 		}
-		
+
 		// Parse volume specification: host:container
 		parts := strings.Split(volume, ":")
 		if len(parts) != 2 {
 			return fmt.Errorf("invalid volume format: %s (expected host:container)", volume)
 		}
-		
+
 		hostPath := strings.TrimSpace(parts[0])
 		containerPath := strings.TrimSpace(parts[1])
-		
+
 		if hostPath == "" || containerPath == "" {
 			return fmt.Errorf("invalid volume format: %s (host and container paths cannot be empty)", volume)
 		}
-		
+
 		// Ensure container path is absolute
 		if !filepath.IsAbs(containerPath) {
 			return fmt.Errorf("container path must be absolute: %s", containerPath)
 		}
-		
+
 		// Check if host path exists
 		hostInfo, err := os.Stat(hostPath)
 		if err != nil {
 			return fmt.Errorf("host path does not exist: %s: %v", hostPath, err)
 		}
-		
+
 		// Create mount point in rootfs (before chroot)
 		// The mount point path relative to rootfs
 		mountPoint := filepath.Join(rootfsPath, containerPath)
-		
+
 		// Create parent directories if they don't exist
 		if err := os.MkdirAll(filepath.Dir(mountPoint), 0755); err != nil {
 			return fmt.Errorf("failed to create parent directories for mount point %s: %v", mountPoint, err)
 		}
-		
+
 		// Create the mount point directory if it doesn't exist
 		// If host path is a directory, create a directory; if it's a file, create parent and touch the file
 		if hostInfo.IsDir() {
@@ -754,7 +810,7 @@ func mountVolumes(volumesStr string) error {
 				}
 			}
 		}
-		
+
 		// Perform bind mount
 		// MS_BIND: Create a bind mount
 		// MS_REC: Recursive bind mount (mount subtree)
@@ -763,17 +819,17 @@ func mountVolumes(volumesStr string) error {
 		if err := syscall.Mount(hostPath, mountPoint, "", uintptr(flags), ""); err != nil {
 			return fmt.Errorf("failed to bind mount %s to %s: %v", hostPath, mountPoint, err)
 		}
-		
+
 		// Set mount propagation to private
 		// This prevents mount/unmount events in the container from affecting the host
 		if err := syscall.Mount("", mountPoint, "", syscall.MS_PRIVATE|syscall.MS_REC, ""); err != nil {
 			// If setting mount propagation fails, log a warning but continue
 			fmt.Fprintf(os.Stderr, "  - Warning: Failed to set mount propagation for %s: %v\n", mountPoint, err)
 		}
-		
+
 		fmt.Fprintf(os.Stderr, "  - Mounted %s -> %s\n", hostPath, containerPath)
 	}
-	
+
 	return nil
 }
 
@@ -781,10 +837,10 @@ func mountVolumes(volumesStr string) error {
 // This runs before chroot, so we can use the host's ip command
 func configureContainerNetwork() error {
 	pid := os.Getpid()
-	
+
 	// Find the veth interface in this namespace (it will be named vethc<pid>)
 	vethName := fmt.Sprintf("vethc%d", pid)
-	
+
 	// Use absolute path to ip command (available on host before chroot)
 	ipCmd := "/usr/bin/ip"
 	if _, err := os.Stat(ipCmd); os.IsNotExist(err) {
@@ -794,14 +850,14 @@ func configureContainerNetwork() error {
 			ipCmd = "ip" // Fall back to PATH
 		}
 	}
-	
+
 	// First, try to find any veth interface (in case naming differs)
 	cmd := exec.Command(ipCmd, "link", "show", "type", "veth")
 	output, err := cmd.Output()
 	if err != nil {
 		return fmt.Errorf("failed to list veth interfaces: %v", err)
 	}
-	
+
 	// Parse output to find veth interface name
 	lines := strings.Split(string(output), "\n")
 	var foundVeth string
@@ -818,20 +874,20 @@ func configureContainerNetwork() error {
 			}
 		}
 	}
-	
+
 	if foundVeth == "" {
 		// Try the expected name
 		foundVeth = vethName
 	}
-	
+
 	fmt.Fprintf(os.Stderr, "  - Found container veth interface: %s\n", foundVeth)
-	
+
 	// Bring up the interface
 	cmd = exec.Command(ipCmd, "link", "set", foundVeth, "up")
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to bring up container veth: %v", err)
 	}
-	
+
 	// Assign IP address to container interface (10.0.0.2/24)
 	containerIP := "10.0.0.2/24"
 	cmd = exec.Command(ipCmd, "addr", "add", containerIP, "dev", foundVeth)
@@ -839,17 +895,17 @@ func configureContainerNetwork() error {
 		// IP might already be set
 		fmt.Fprintf(os.Stderr, "  - Note: IP assignment: %v\n", err)
 	}
-	
+
 	// Set up default route through the host veth (10.0.0.1)
 	cmd = exec.Command(ipCmd, "route", "add", "default", "via", "10.0.0.1", "dev", foundVeth)
 	if err := cmd.Run(); err != nil {
 		// Route might already exist
 		fmt.Fprintf(os.Stderr, "  - Note: Route setup: %v\n", err)
 	}
-	
+
 	fmt.Fprintf(os.Stderr, "  - Container IP: %s\n", containerIP)
 	fmt.Fprintln(os.Stderr, "  - Network configuration complete")
-	
+
 	return nil
 }
 
@@ -859,32 +915,32 @@ func listContainers() {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		return
 	}
-	
+
 	files, err := os.ReadDir(containersDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error reading containers directory: %v\n", err)
 		return
 	}
-	
+
 	if len(files) == 0 {
 		fmt.Println("No containers found")
 		return
 	}
-	
+
 	fmt.Printf("%-20s %-10s %-10s %-30s %s\n", "CONTAINER ID", "STATUS", "PID", "CREATED", "COMMAND")
 	fmt.Println(strings.Repeat("-", 100))
-	
+
 	for _, file := range files {
 		if !strings.HasSuffix(file.Name(), ".json") {
 			continue
 		}
-		
+
 		containerID := strings.TrimSuffix(file.Name(), ".json")
 		state, err := loadContainerState(containerID)
 		if err != nil {
 			continue
 		}
-		
+
 		// Check if process is still running
 		status := state.Status
 		if status == "running" {
@@ -894,12 +950,12 @@ func listContainers() {
 				updateContainerStatus(containerID, "exited")
 			}
 		}
-		
+
 		command := strings.Join(state.Command, " ")
 		if len(command) > 40 {
 			command = command[:37] + "..."
 		}
-		
+
 		created := state.CreatedAt.Format("2006-01-02 15:04:05")
 		fmt.Printf("%-20s %-10s %-10d %-30s %s\n", containerID[:12], status, state.PID, created, command)
 	}
@@ -912,46 +968,46 @@ func stopContainer(containerID string) {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	
+
 	if state.Status != "running" {
 		fmt.Printf("Container %s is not running (status: %s)\n", containerID[:12], state.Status)
 		return
 	}
-	
+
 	// Check if process is still running
 	if err := syscall.Kill(state.PID, 0); err != nil {
 		fmt.Printf("Container %s is not running\n", containerID[:12])
 		updateContainerStatus(containerID, "exited")
 		return
 	}
-	
+
 	// Send SIGTERM to stop the container
 	fmt.Printf("Stopping container %s (PID: %d)...\n", containerID[:12], state.PID)
 	if err := syscall.Kill(state.PID, syscall.SIGTERM); err != nil {
 		fmt.Fprintf(os.Stderr, "Error stopping container: %v\n", err)
 		os.Exit(1)
 	}
-	
+
 	// Wait a bit for graceful shutdown
 	time.Sleep(2 * time.Second)
-	
+
 	// Check if still running, send SIGKILL if needed
 	if err := syscall.Kill(state.PID, 0); err == nil {
 		fmt.Println("Container did not stop gracefully, sending SIGKILL...")
 		syscall.Kill(state.PID, syscall.SIGKILL)
 		time.Sleep(500 * time.Millisecond)
 	}
-	
+
 	// Cleanup network
 	if state.VethHost != "" {
 		cleanupNetwork(state.VethHost, "")
 	}
-	
+
 	// Update status
 	if err := updateContainerStatus(containerID, "stopped"); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: Failed to update container status: %v\n", err)
 	}
-	
+
 	fmt.Printf("Container %s stopped\n", containerID[:12])
 }
 
@@ -962,7 +1018,7 @@ func removeContainer(containerID string) {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	
+
 	// Check if container is running
 	if state.Status == "running" {
 		if err := syscall.Kill(state.PID, 0); err == nil {
@@ -970,21 +1026,21 @@ func removeContainer(containerID string) {
 			os.Exit(1)
 		}
 	}
-	
+
 	// Remove state file
 	stateFile := filepath.Join(containersDir, containerID+".json")
 	if err := os.Remove(stateFile); err != nil {
 		fmt.Fprintf(os.Stderr, "Error removing container state: %v\n", err)
 		os.Exit(1)
 	}
-	
+
 	// Remove log file if it exists
 	if state.LogFile != "" {
 		if err := os.Remove(state.LogFile); err != nil && !os.IsNotExist(err) {
 			fmt.Fprintf(os.Stderr, "Warning: Failed to remove log file: %v\n", err)
 		}
 	}
-	
+
 	fmt.Printf("Container %s removed\n", containerID[:12])
 }
 
@@ -995,23 +1051,22 @@ func showLogs(containerID string) {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	
+
 	if state.LogFile == "" {
 		fmt.Fprintf(os.Stderr, "Error: No log file found for container %s\n", containerID[:12])
 		os.Exit(1)
 	}
-	
+
 	logFile, err := os.Open(state.LogFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error opening log file: %v\n", err)
 		os.Exit(1)
 	}
 	defer logFile.Close()
-	
+
 	// Copy log file contents to stdout
 	if _, err := io.Copy(os.Stdout, logFile); err != nil {
 		fmt.Fprintf(os.Stderr, "Error reading log file: %v\n", err)
 		os.Exit(1)
 	}
 }
-

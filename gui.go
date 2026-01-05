@@ -377,8 +377,9 @@ func (gui *GockerGUI) createContainer() {
 	commandParts := strings.Fields(command)
 	args = append(args, commandParts...)
 	
-	// Execute gocker command
-	cmd := exec.Command("/proc/self/exe", args...)
+	// Execute gocker command with sudo (container operations need root)
+	cmdArgs := append([]string{"/proc/self/exe"}, args...)
+	cmd := exec.Command("sudo", cmdArgs...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	
@@ -422,7 +423,7 @@ func (gui *GockerGUI) stopSelectedContainer() {
 		fmt.Sprintf("Are you sure you want to stop container %s?", container.ID[:12]),
 		func(confirmed bool) {
 			if confirmed {
-				cmd := exec.Command("/proc/self/exe", "stop", container.ID)
+				cmd := exec.Command("sudo", "/proc/self/exe", "stop", container.ID)
 				output, err := cmd.CombinedOutput()
 				if err != nil {
 					dialog.ShowError(fmt.Errorf("failed to stop container: %v\n%s", err, output), gui.window)
@@ -456,7 +457,7 @@ func (gui *GockerGUI) removeSelectedContainer() {
 		fmt.Sprintf("Are you sure you want to remove container %s?", container.ID[:12]),
 		func(confirmed bool) {
 			if confirmed {
-				cmd := exec.Command("/proc/self/exe", "rm", container.ID)
+				cmd := exec.Command("sudo", "/proc/self/exe", "rm", container.ID)
 				output, err := cmd.CombinedOutput()
 				if err != nil {
 					dialog.ShowError(fmt.Errorf("failed to remove container: %v\n%s", err, output), gui.window)

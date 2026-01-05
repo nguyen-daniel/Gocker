@@ -43,7 +43,15 @@ func TestGockerRun(t *testing.T) {
 	// - Chroot into rootfs
 	// - Mount /proc
 	// - Execute commands inside the isolated environment
-	cmd := exec.Command("sudo", binaryPath, "run", "/bin/busybox", "true")
+	
+	// If test is already running as root (via sudo go test), call binary directly
+	// Otherwise, use sudo to elevate privileges
+	var cmd *exec.Cmd
+	if os.Geteuid() == 0 {
+		cmd = exec.Command(binaryPath, "run", "/bin/busybox", "true")
+	} else {
+		cmd = exec.Command("sudo", binaryPath, "run", "/bin/busybox", "true")
+	}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
@@ -74,7 +82,12 @@ func TestGockerRunWithHostname(t *testing.T) {
 
 	// Execute hostname command inside container
 	// The hostname should be "gocker-container" as set in the child() function
-	cmd := exec.Command("sudo", binaryPath, "run", "/bin/hostname")
+	var cmd *exec.Cmd
+	if os.Geteuid() == 0 {
+		cmd = exec.Command(binaryPath, "run", "/bin/hostname")
+	} else {
+		cmd = exec.Command("sudo", binaryPath, "run", "/bin/hostname")
+	}
 	output, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("Gocker failed to execute hostname in container: %v", err)

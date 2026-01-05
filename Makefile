@@ -8,13 +8,14 @@ ALPINE_IMAGE=alpine:latest
 # This creates the gocker executable that will be used for container operations
 build:
 	@echo "Building $(BINARY_NAME)..."
-	@go build -o $(BINARY_NAME) main.go
+	@go build -o $(BINARY_NAME) .
 	@echo "Build complete: $(BINARY_NAME)"
 
 # Setup downloads and extracts a mini-Alpine rootfs using docker export
 # This is necessary because Gocker uses chroot to create filesystem isolation
 # The rootfs provides a minimal Linux environment inside the container
 setup: $(ROOTFS_DIR)
+	@echo "Rootfs is already set up at $(ROOTFS_DIR)/"
 
 $(ROOTFS_DIR):
 	@echo "Rootfs directory not found. Setting up Alpine Linux rootfs using Docker..."
