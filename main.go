@@ -116,12 +116,17 @@ func child() {
 		}
 	}
 
+	// Set PATH environment variable for the container
+	// This ensures commands like ls, ps, hostname can be found
+	os.Setenv("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+
 	// Execute the user's command
 	fmt.Fprintf(os.Stderr, "Executing command: %s %v\n", command, args)
 	cmd := exec.Command(command, args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	cmd.Env = os.Environ() // Use the environment with PATH set
 
 	must(cmd.Run())
 }

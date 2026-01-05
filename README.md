@@ -80,11 +80,18 @@ This command will:
 
 You can also run custom commands:
 
-```bash
-sudo ./gocker run /bin/ls -la
-sudo ./gocker run /bin/ps aux
-sudo ./gocker run /bin/hostname
-```
+   ```bash
+   # Standard commands (PATH is set in the container)
+   sudo ./gocker run /bin/ls -la /
+   sudo ./gocker run /bin/ps aux
+   sudo ./gocker run /bin/hostname
+   sudo ./gocker run /bin/echo "Hello from container!"
+   
+   # Or use busybox directly (always works)
+   sudo ./gocker run /bin/busybox ls -la /
+   sudo ./gocker run /bin/busybox ps aux
+   sudo ./gocker run /bin/busybox hostname
+   ```
 
 ### 5. Clean Up
 
