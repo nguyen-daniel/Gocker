@@ -127,9 +127,6 @@ You can also run commands from your **host system** (outside the container):
    sudo ./gocker stop <container-id>   # Stop a running container
    sudo ./gocker logs <container-id>   # View container logs
    sudo ./gocker rm <container-id>    # Remove a container
-   
-   # Graphical User Interface
-   sudo ./gocker gui                   # Launch GUI for visual container management
    ```
 
 #### Commands Inside the Container
@@ -226,34 +223,7 @@ sudo ./gocker rm <container-id>
 - Logs are stored in `/var/lib/gocker/logs/<container-id>.log`
 - Container status can be: `running`, `stopped`, or `exited`
 
-### 6. Graphical User Interface
-
-Gocker includes a graphical user interface built with Fyne for visual container management:
-
-```bash
-# Launch the GUI
-sudo ./gocker gui
-```
-
-**GUI Features:**
-- **Container List**: View all containers with their status (running, stopped, exited)
-- **Container Creation**: Create new containers with a visual form:
-  - Command input
-  - CPU limit setting
-  - Memory limit setting
-  - Volume mount configuration
-  - Detached mode option
-- **Container Details**: View detailed information about selected containers
-- **Log Viewer**: Real-time log viewing for containers
-- **Container Actions**: Stop and remove containers with confirmation dialogs
-- **Auto-refresh**: Container list automatically refreshes every 2 seconds
-
-**GUI Framework:**
-- Built with [Fyne](https://fyne.io) - a cross-platform GUI toolkit for Go
-- Native look and feel on Linux, macOS, and Windows
-- See `GUI_FRAMEWORKS.md` for framework comparison and alternatives
-
-### 7. Clean Up
+### 6. Clean Up
 
 Remove the built binary:
 
@@ -269,7 +239,7 @@ make clean
 - **Host Commands**: Run from your regular terminal (outside containers) using `sudo ./gocker` - these create and manage containers
 - **Container Commands**: Run inside a container shell (after `make run` or `sudo ./gocker run /bin/sh`) - these are regular Linux commands
 
-Gocker provides a command-line interface for managing containers. All host commands (except `gui`) require root privileges via `sudo`.
+Gocker provides a command-line interface for managing containers. All host commands require root privileges via `sudo`.
 
 #### Basic Commands
 
@@ -288,9 +258,6 @@ sudo ./gocker stop <container-id>
 
 # Remove a stopped container
 sudo ./gocker rm <container-id>
-
-# Launch graphical user interface
-./gocker gui  # Note: GUI doesn't require sudo (uses sudo internally)
 ```
 
 #### Running Containers
@@ -483,98 +450,6 @@ exit                        # Exit the container shell (returns to host)
 - Changes to the filesystem are isolated to the container (unless using volumes)
 - Network isolation means the container has its own IP address (10.0.0.2)
 
-### Graphical User Interface (GUI)
-
-The GUI provides a visual interface for container management without needing to remember command syntax.
-
-#### Launching the GUI
-
-```bash
-# Launch GUI (doesn't require sudo - uses sudo internally)
-./gocker gui
-
-# Or with sudo (may have X11 display issues)
-sudo ./gocker gui
-```
-
-**Note:** The GUI should be run without `sudo` to avoid X11 display issues. It will use `sudo` internally for container operations that require root privileges.
-
-#### GUI Features and Usage
-
-1. **Container List Panel (Left Side)**
-   - Displays all containers with their IDs and status
-   - Status colors: Green (running), Yellow (stopped/exited)
-   - Click on a container to view details and logs
-   - Auto-refreshes every 2 seconds
-
-2. **Container Details Panel (Left Side, Below List)**
-   - Shows detailed information about the selected container:
-     - Container ID
-     - Status (running/stopped/exited)
-     - Process ID (PID)
-     - Creation timestamp
-     - Command executed
-     - Detached mode status
-     - Network interface name
-
-3. **Log Viewer Panel (Right Side)**
-   - Displays real-time logs for the selected container
-   - Scrollable log viewer
-   - "Clear" button to clear the log display
-   - Logs update automatically when selecting different containers
-
-4. **Container Creation Form (Bottom)**
-   - **Command**: Enter the command to run (e.g., `/bin/busybox sh -c 'while true; do echo Hello; sleep 5; done'`)
-   - **CPU Limit**: Optional CPU limit (e.g., `1`, `0.5`, `max`)
-   - **Memory Limit**: Optional memory limit (e.g., `512M`, `1G`, `max`)
-   - **Volume Mount**: Optional volume mount (format: `/host/path:/container/path`)
-   - **Detached Mode**: Checkbox to run container in background
-   - **Create Container**: Button to start the container
-
-5. **Container Actions (Buttons Below List)**
-   - **Stop**: Stop the selected running container (with confirmation dialog)
-   - **Remove**: Remove the selected stopped container (with confirmation dialog)
-   - **Refresh**: Manually refresh the container list
-
-#### GUI Workflow Examples
-
-**Creating a Container via GUI:**
-1. Launch GUI: `./gocker gui`
-2. Fill in the form at the bottom:
-   - Command: `/bin/busybox sh -c 'while true; do echo Hello; sleep 5; done'`
-   - CPU Limit: `1`
-   - Memory Limit: `512M`
-   - Volume Mount: `/tmp:/mnt/tmp` (optional)
-   - Check "Run in background (detached)" if desired
-3. Click "Create Container"
-4. Container appears in the list with status "running"
-
-**Viewing Container Logs via GUI:**
-1. Select a container from the list
-2. Container details appear in the details panel
-3. Logs automatically appear in the log viewer panel on the right
-4. Use scrollbar to view full log history
-
-**Stopping a Container via GUI:**
-1. Select a running container from the list
-2. Click "Stop" button
-3. Confirm the action in the dialog
-4. Container status changes to "stopped"
-
-**Removing a Container via GUI:**
-1. Select a stopped container from the list
-2. Click "Remove" button
-3. Confirm the action in the dialog
-4. Container is removed from the list
-
-#### GUI Tips
-
-- The container list auto-refreshes every 2 seconds, so you'll see status changes automatically
-- You can use the "Refresh" button to manually update the list
-- Logs are read from disk, so they persist even after containers stop
-- The GUI uses `sudo` internally, so you may be prompted for your password when performing operations
-- If you encounter X11 display issues, make sure you're running the GUI without `sudo`
-
 ## How It Works
 
 Gocker creates isolated containers using several Linux features:
@@ -659,7 +534,6 @@ The container runs in isolated namespaces:
 - **Detached Mode**: Run containers in the background with `--detach` or `-d` flag
 - **Container Logging**: Automatic log file creation for all containers
 - **State Management**: Container metadata stored in `/var/lib/gocker/containers/`
-- **Graphical User Interface**: Visual container management with Fyne-based GUI
 - **Filesystem Jail**: Chroot-based filesystem isolation with Alpine Linux rootfs
 - **Proc Filesystem**: Isolated `/proc` mount for container-specific process information
 - **Automatic Cleanup**: Network interfaces and rules are automatically cleaned up on container exit
