@@ -39,6 +39,10 @@ jobs:
       # The rootfs is necessary for chroot to create filesystem isolation
       run: make setup
     
+    - name: Unprivileged user-namespace tests
+      # Optional user-namespace path (not the rootful 4-ns default).
+      run: make test-unprivileged
+
     - name: Run tests
       # Tests must run with sudo because:
       # 1. Linux namespaces (CLONE_NEWUTS, CLONE_NEWPID, CLONE_NEWNS) require root
@@ -46,4 +50,7 @@ jobs:
       # 3. Chroot operations require root to change the root filesystem
       # Without sudo, the container isolation features cannot function
       run: sudo make test
+
+    - name: Startup benchmark
+      run: sudo make bench
 
