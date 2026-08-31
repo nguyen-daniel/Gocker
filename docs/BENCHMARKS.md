@@ -10,7 +10,7 @@ make bench          # N=20
 N=50 make bench
 ```
 
-`scripts/bench_startup.sh` times `gocker run /bin/busybox true` vs `docker run --rm alpine true` (if Docker works). First timed run is **cold**; the rest are **warm**. Writes `docs/startup_bench.json`.
+`scripts/bench_startup.sh` times `gocker run /bin/busybox true` vs `docker run --rm alpine true` (if Docker works). First timed run is **cold**; the rest are **warm**. Writes `docs/startup_bench.json`. GitHub Actions uploads that file as artifact `startup-bench` (not checked in; do not invent numbers).
 
 ## Claims vs evidence
 

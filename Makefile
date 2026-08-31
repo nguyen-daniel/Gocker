@@ -50,8 +50,9 @@ test-unprivileged: build
 	@GOCKER_ALLOW_UNPRIVILEGED=1 go test -v -run 'TestNamespaceConfig|TestCloneUserNamespace|TestCPULimitParsing|TestMemoryLimitParsing|TestFindFreeIP'
 
 # Startup benchmark vs docker (Linux + sudo). Writes docs/BENCHMARKS.md.
+# Invoke via bash so a missing execute bit (git 100644, Windows checkouts) cannot fail CI.
 bench: build setup
-	@N=$${N:-20} ./scripts/bench_startup.sh
+	@N=$${N:-20} bash ./scripts/bench_startup.sh
 
 clean:
 	@echo "Cleaning up..."

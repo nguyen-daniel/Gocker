@@ -4,10 +4,12 @@ Gocker demo transcript
 Captured to match what CI already asserts:
   TestGockerRun              → command inside the jail succeeds
   TestGockerRunWithHostname  → hostname is "gocker-container"
+  TestOverlayWriteIsolation  → writes stay in per-container OverlayFS upper
 
-This file was written on Windows (no Linux namespaces / chroot), so it is a
-faithful transcript of the messages main.go prints plus the two command
-outputs CI checks — not a live capture from this machine.
+Illustrative Linux capture (not live from this Windows machine). Text is the
+messages main.go / child() print on a successful rootful run: OverlayFS mount
+then pivot_root — not chroot. Placeholders (PIDs, veth names, paths) are
+not measured numbers.
 
 Regenerate on Linux (or GitHub Actions ubuntu-latest)
 -----------------------------------------------------
@@ -42,8 +44,9 @@ Configuring container network...
   - Found container veth interface: vethc.......
   - Container IP: 10.0.0.2
   - Network configuration complete
+Mounting OverlayFS (lower=.../rootfs, dirs=/var/lib/gocker/containers/<id>)...
 Setting hostname to 'gocker-container'...
-Creating filesystem jail with chroot (.../rootfs)...
+Entering OverlayFS jail with pivot_root (/var/lib/gocker/containers/<id>/merged)...
 Mounting proc filesystem...
 Executing command: /bin/busybox [echo hello]
 hello
