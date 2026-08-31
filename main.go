@@ -889,6 +889,64 @@ func parseMemoryLimit(memoryLimit string) (string, error) {
 }
 
 // ============================================================================
+// OverlayFS + pivot_root
+// ============================================================================
+
+func overlayBaseDir(containerID string) string {
+	return filepath.Join(containersDir, containerID)
+}
+
+func createOverlayDirs(containerID string) error {
+	base := overlayBaseDir(containerID)
+	for _, name := range []string{"upper", "work", "merged"} {
+		if err := os.MkdirAll(filepath.Join(base, name), 0755); err != nil {
+			return fmt.Errorf("mkdir overlay %s: %v", name, err)
+		}
+	}
+	return nil
+}
+
+func cleanupOverlayDirs(containerID string) {
+	if containerID == "" {
+		return
+	}
+	base := overlayBaseDir(containerID)
+	_ = syscall.Unmount(filepath.Join(base, "merged"), syscall.MNT_DETACH)
+	_ = os.RemoveAll(base)
+}
+
+func mountOverlay(lower, overlayBase string) (merged string, err error) {
+	upper := filepath.Join(overlayBase, "upper")
+	work := filepath.Join(overlayBase, "work")
+	merged = filepath.Join(overlayBase, "merged")
+	opts := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", lower, upper, work)
+	if err := syscall.Mount("overlay", merged, "overlay", 0, opts); err != nil {
+		return "", fmt.Errorf("overlay mount: %v", err)
+	}
+	return merged, nil
+}
+
+func pivotRoot(newRoot string) error {
+	putOld := filepath.Join(newRoot, ".pivot_old")
+	if err := os.MkdirAll(putOld, 0700); err != nil {
+		return fmt.Errorf("mkdir put_old: %v", err)
+	}
+	if err := syscall.PivotRoot(newRoot, putOld); err != nil {
+		return fmt.Errorf("pivot_root: %v", err)
+	}
+	if err := os.Chdir("/"); err != nil {
+		return fmt.Errorf("chdir /: %v", err)
+	}
+	if err := syscall.Unmount("/.pivot_old", syscall.MNT_DETACH); err != nil {
+		return fmt.Errorf("unmount old root: %v", err)
+	}
+	if err := os.Remove("/.pivot_old"); err != nil {
+		fmt.Fprintf(os.Stderr, "  - Note: rmdir /.pivot_old: %v\n", err)
+	}
+	return nil
+}
+
+// ============================================================================
 // Main run/child logic
 // ============================================================================
 
@@ -947,9 +1005,14 @@ func run() {
 	// Generate container ID
 	containerID := generateContainerID()
 
+	if err := createOverlayDirs(containerID); err != nil {
+		must(fmt.Errorf("failed to create overlay dirs: %v", err))
+	}
+
 	// Create per-container cgroup
 	cgroupPath, err := createContainerCgroup(containerID)
 	if err != nil {
+		cleanupOverlayDirs(containerID)
 		must(fmt.Errorf("failed to create cgroup: %v", err))
 	}
 
@@ -957,12 +1020,14 @@ func run() {
 	fmt.Fprintln(os.Stderr, "Setting up cgroups v2 for resource limits...")
 	if err := setupContainerCgroup(cgroupPath, cpuLimit, memoryLimit); err != nil {
 		cleanupContainerCgroup(cgroupPath)
+		cleanupOverlayDirs(containerID)
 		must(err)
 	}
 
 	// Set environment variables to pass to child process
 	os.Setenv("GOCKER_CONTAINER_ID", containerID)
 	os.Setenv("GOCKER_ROOTFS", resolvedRootfs)
+	os.Setenv("GOCKER_OVERLAY_DIR", overlayBaseDir(containerID))
 	os.Setenv("GOCKER_CGROUP_PATH", cgroupPath)
 	if len(volumes) > 0 {
 		os.Setenv("GOCKER_VOLUMES", strings.Join(volumes, "|"))
@@ -972,12 +1037,14 @@ func run() {
 	logFile := filepath.Join(stateDir, "logs", containerID+".log")
 	if err := os.MkdirAll(filepath.Dir(logFile), 0755); err != nil {
 		cleanupContainerCgroup(cgroupPath)
+		cleanupOverlayDirs(containerID)
 		must(fmt.Errorf("failed to create logs directory: %v", err))
 	}
 
 	logWriter, err := os.Create(logFile)
 	if err != nil {
 		cleanupContainerCgroup(cgroupPath)
+		cleanupOverlayDirs(containerID)
 		must(fmt.Errorf("failed to create log file: %v", err))
 	}
 	defer logWriter.Close()
@@ -998,11 +1065,15 @@ func run() {
 
 	cmd := exec.Command("/proc/self/exe", append([]string{"child"}, remainingArgs...)...)
 
-	// Set up I/O
+	// Set up I/O. Detached children must inherit the log *os.File only.
+	// Wiring os.Stdout/os.Stderr (or a MultiWriter) makes exec.Cmd use a pipe
+	// plus a copy goroutine; Wait() then blocks until the child exits, and
+	// closing that pipe when the parent exits can kill the child (the reaper
+	// then removes the cgroup the integration tests look for).
 	if detached {
 		cmd.Stdin = nil
-		cmd.Stdout = io.MultiWriter(logWriter, os.Stdout)
-		cmd.Stderr = io.MultiWriter(logWriter, os.Stderr)
+		cmd.Stdout = logWriter
+		cmd.Stderr = logWriter
 	} else {
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = io.MultiWriter(logWriter, os.Stdout)
@@ -1019,6 +1090,7 @@ func run() {
 	// Start the command
 	if err := cmd.Start(); err != nil {
 		cleanupContainerCgroup(cgroupPath)
+		cleanupOverlayDirs(containerID)
 		must(err)
 	}
 
@@ -1135,23 +1207,36 @@ func child() {
 	containerGID := syscall.Getgid()
 	fmt.Fprintf(os.Stderr, "Container UID: %d, GID: %d\n", containerUID, containerGID)
 
-	// Get rootfs path from environment
+	// Get rootfs path (shared OverlayFS lower) from environment
 	rootfsPath := os.Getenv("GOCKER_ROOTFS")
 	if rootfsPath == "" {
 		rootfsPath = "./rootfs"
 	}
+	overlayBase := os.Getenv("GOCKER_OVERLAY_DIR")
+	if overlayBase == "" {
+		must(fmt.Errorf("GOCKER_OVERLAY_DIR not set"))
+	}
 
-	// Configure network inside the container namespace
+	// Configure network inside the container namespace (host tools, before jail)
 	fmt.Fprintln(os.Stderr, "Configuring container network...")
 	if err := configureContainerNetwork(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: Failed to configure container network: %v\n", err)
 	}
 
-	// Mount volumes before chroot
+	// Stop mount propagation so the overlay does not leak onto the host.
+	if err := syscall.Mount("", "/", "", syscall.MS_REC|syscall.MS_PRIVATE, ""); err != nil {
+		fmt.Fprintf(os.Stderr, "  - Note: MS_PRIVATE on /: %v\n", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "Mounting OverlayFS (lower=%s, dirs=%s)...\n", rootfsPath, overlayBase)
+	merged, err := mountOverlay(rootfsPath, overlayBase)
+	must(err)
+
+	// Bind-mount volumes onto the overlay (not the shared lower).
 	volumesStr := os.Getenv("GOCKER_VOLUMES")
 	if volumesStr != "" {
 		fmt.Fprintln(os.Stderr, "Mounting volumes...")
-		if err := mountVolumes(volumesStr, rootfsPath); err != nil {
+		if err := mountVolumes(volumesStr, merged); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: Failed to mount volumes: %v\n", err)
 		}
 	}
@@ -1160,18 +1245,14 @@ func child() {
 	fmt.Fprintln(os.Stderr, "Setting hostname to 'gocker-container'...")
 	must(syscall.Sethostname([]byte("gocker-container")))
 
-	// Alpine docker-export rootfs has no /dev/null or /dev/zero. Background
-	// jobs (and pids.max tests) need them inside the jail — create before chroot.
-	if err := ensureJailDevices(rootfsPath); err != nil {
+	// Alpine docker-export rootfs has no /dev/null or /dev/zero. Create them
+	// on the overlay so mknod writes go to this container's upper dir.
+	if err := ensureJailDevices(merged); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: Failed to set up jail device nodes: %v\n", err)
 	}
 
-	// Create filesystem jail using chroot
-	fmt.Fprintf(os.Stderr, "Creating filesystem jail with chroot (%s)...\n", rootfsPath)
-	must(syscall.Chroot(rootfsPath))
-
-	// Change to root directory after chroot
-	must(os.Chdir("/"))
+	fmt.Fprintf(os.Stderr, "Entering OverlayFS jail with pivot_root (%s)...\n", merged)
+	must(pivotRoot(merged))
 
 	// Mount proc filesystem
 	fmt.Fprintln(os.Stderr, "Mounting proc filesystem...")
@@ -1220,10 +1301,10 @@ func isCharDevice(path string) bool {
 	return fi.Mode()&os.ModeCharDevice != 0
 }
 
-// ensureJailDevices creates /dev/null and /dev/zero in the rootfs before chroot.
-// Prefer mknod so the shared Alpine rootfs keeps the nodes; bind-mount host
-// devices if mknod is blocked (nodev). Mounts are made private first so a
-// bind does not leak onto the host.
+// ensureJailDevices creates /dev/null and /dev/zero on the OverlayFS merged
+// view before pivot_root. Prefer mknod (writes land in this container's upper
+// dir); bind-mount host devices if mknod is blocked (nodev). The child's mount
+// namespace is already MS_PRIVATE so a bind does not leak onto the host.
 func ensureJailDevices(rootfsPath string) error {
 	if err := syscall.Mount("", "/", "", syscall.MS_REC|syscall.MS_PRIVATE, ""); err != nil {
 		// Non-fatal: some environments reject remounting /.
@@ -1618,9 +1699,10 @@ func removeContainer(containerID string) {
 		}
 	}
 
-	// Cleanup network and cgroup (in case they weren't cleaned up on stop)
+	// Cleanup network, cgroup, and OverlayFS dirs (in case they weren't cleaned up on stop)
 	cleanupContainerNetwork(state.ID, state.VethHost)
 	cleanupContainerCgroup(state.CgroupPath)
+	cleanupOverlayDirs(state.ID)
 
 	// Remove state file
 	stateFile := filepath.Join(containersDir, state.ID+".json")
