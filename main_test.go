@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -298,6 +299,80 @@ func TestIPAM(t *testing.T) {
 	}
 }
 
+// TestFindFreeIP covers wrap-around reuse when NextIP is past 254.
+func TestFindFreeIP(t *testing.T) {
+	ipam := &IPAMState{
+		AllocatedIPs: map[string]string{"a": "10.0.0.2"},
+		NextIP:       2,
+	}
+	ip, octet, ok := findFreeIP(ipam)
+	if !ok || ip != "10.0.0.3" || octet != 3 {
+		t.Errorf("sequential: got ip=%s octet=%d ok=%v, want 10.0.0.3 / 3", ip, octet, ok)
+	}
+
+	ipam = &IPAMState{
+		AllocatedIPs: map[string]string{"keep": "10.0.0.2"},
+		NextIP:       255,
+	}
+	ip, octet, ok = findFreeIP(ipam)
+	if !ok || ip != "10.0.0.3" || octet != 3 {
+		t.Errorf("wrap scan: got ip=%s octet=%d ok=%v, want 10.0.0.3 / 3", ip, octet, ok)
+	}
+
+	full := make(map[string]string, 253)
+	for i := 2; i <= 254; i++ {
+		full[fmt.Sprintf("c%d", i)] = fmt.Sprintf("10.0.0.%d", i)
+	}
+	ipam = &IPAMState{AllocatedIPs: full, NextIP: 255}
+	if _, _, ok = findFreeIP(ipam); ok {
+		t.Error("expected no free IP when 2–254 are all allocated")
+	}
+}
+
+// TestIPAMReuse allocates after NextIP is past 254 and must not reuse an in-use address.
+func TestIPAMReuse(t *testing.T) {
+	keepID := "test-ipam-reuse-keep-" + time.Now().Format("20060102150405.000")
+	newID := "test-ipam-reuse-new-" + time.Now().Format("20060102150405.000")
+
+	keepIP, err := allocateIP(keepID)
+	if err != nil {
+		t.Fatalf("allocate keep: %v", err)
+	}
+	defer releaseIP(keepID)
+
+	holeID := "test-ipam-reuse-hole-" + time.Now().Format("20060102150405.000")
+	holeIP, err := allocateIP(holeID)
+	if err != nil {
+		t.Fatalf("allocate hole: %v", err)
+	}
+	if err := releaseIP(holeID); err != nil {
+		t.Fatalf("release hole: %v", err)
+	}
+
+	ipam, err := loadIPAM()
+	if err != nil {
+		t.Fatalf("load IPAM: %v", err)
+	}
+	ipam.NextIP = 255
+	if err := saveIPAM(ipam); err != nil {
+		t.Fatalf("save NextIP=255: %v", err)
+	}
+
+	newIP, err := allocateIP(newID)
+	if err != nil {
+		t.Fatalf("allocate after wrap: %v", err)
+	}
+	defer releaseIP(newID)
+
+	if newIP == keepIP {
+		t.Errorf("reused in-use IP %s", keepIP)
+	}
+	if newIP == "" || !strings.HasPrefix(newIP, "10.0.0.") {
+		t.Errorf("unexpected reused IP %q", newIP)
+	}
+	t.Logf("keep=%s hole=%s reused=%s", keepIP, holeIP, newIP)
+}
+
 // TestRootfsResolution verifies rootfs path resolution
 func TestRootfsResolution(t *testing.T) {
 	// Test with explicit path
@@ -487,8 +562,9 @@ func TestCloneUserNamespace(t *testing.T) {
 	}
 }
 
-// TestPidsMaxEnforcement starts a detached container and verifies the 21st
-// process in the cgroup is rejected (pids.max=20).
+// TestPidsMaxEnforcement runs a shell that tries to spawn 25 background sleeps
+// and verifies the 21st process in the cgroup is rejected (pids.max=20).
+// Requires /dev/null in the jail so busybox can actually background jobs.
 func TestPidsMaxEnforcement(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("cgroups are Linux-only")
@@ -512,13 +588,15 @@ func TestPidsMaxEnforcement(t *testing.T) {
 	}
 	output, err := cmd.CombinedOutput()
 	out := string(output)
-	t.Logf("pids test output:\n%s", out)
+	t.Logf("pids test output (err=%v):\n%s", err, out)
+	if strings.Contains(out, "can't open '/dev/null'") {
+		t.Errorf("jail is missing /dev/null; background jobs cannot prove pids.max")
+	}
 	// cgroup v2 returns "Resource temporarily unavailable" / "can't fork" when pids.max hits.
-	if !strings.Contains(out, "Resource temporarily unavailable") &&
-		!strings.Contains(out, "can't fork") &&
-		!strings.Contains(strings.ToLower(out), "nproc") {
-		if err == nil && strings.Contains(out, "SPAWNED") {
-			t.Errorf("expected fork failure at the 21st process (pids.max=20); container finished cleanly")
-		}
+	forkFailed := strings.Contains(out, "Resource temporarily unavailable") ||
+		strings.Contains(out, "can't fork") ||
+		strings.Contains(strings.ToLower(out), "nproc")
+	if !forkFailed {
+		t.Errorf("expected fork failure at the 21st process (pids.max=20); got:\n%s", out)
 	}
 }

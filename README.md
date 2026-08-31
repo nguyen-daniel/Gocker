@@ -1,5 +1,7 @@
 # Gocker
 
+[![CI](https://github.com/nguyen-daniel/Gocker/actions/workflows/main.yml/badge.svg)](https://github.com/nguyen-daniel/Gocker/actions/workflows/main.yml)
+
 A small Docker-like runtime in **Go**: isolate a process with Linux namespaces, cgroups v2, a chroot rootfs, and a veth/NAT network. Built to learn how containers actually work — not to replace Docker.
 
 **Linux only.** Windows/macOS cannot run this (no `clone` namespaces). CI is Ubuntu + sudo.
@@ -30,8 +32,9 @@ make bench             # startup vs docker (Linux); writes docs/startup_bench.js
 |----------|-----------------|
 | 4-ns default, optional user ns | `TestNamespaceConfig`, `TestCloneUserNamespace` |
 | Hostname isolation | `TestGockerRunWithHostname` → `gocker-container` |
+| `echo hello` + hostname | [`docs/demo_run.txt`](docs/demo_run.txt) |
 | `pids.max=20` | `TestPidsMaxEnforcement` (Linux) |
-| IPAM 253-IP pool | `TestIPAM`, `TestMultipleContainers` |
+| IPAM 253-IP pool | `TestIPAM`, `TestFindFreeIP`, `TestIPAMReuse`, `TestMultipleContainers` |
 | Startup vs Docker | `make bench` → `docs/BENCHMARKS.md` (not measured on Windows) |
 
 ## Honest limitations
@@ -40,10 +43,7 @@ make bench             # startup vs docker (Linux); writes docs/startup_bench.js
 - User namespace is **not** on the rootful default path — do not claim “5 namespaces” unless you ran `--rootless`.
 - Startup times vs Docker are **hardware-specific**. This repo does not ship a `<100ms` number; run `make bench` on Linux and quote the JSON.
 - Not a production runtime (no image store, no seccomp profile beyond what Alpine + namespaces give you).
-
-## Recruiter-facing one-liner
-
-Go process isolator: 4 Linux namespaces, cgroups v2 (CPU / memory / 20 pids), veth+NAT+IPAM, Alpine chroot. Tests in CI. Optional user namespace for rootless experiments.
+- Shared Alpine rootfs + `chroot` (no overlayfs / `pivot_root`).
 
 ---
 
@@ -53,6 +53,7 @@ Go process isolator: 4 Linux namespaces, cgroups v2 (CPU / memory / 20 pids), ve
 - `main_test.go` — unit + integration tests
 - `scripts/bench_startup.sh` — gocker vs `docker run --rm alpine true`
 - `docs/BENCHMARKS.md` — how to reproduce benches
+- `docs/demo_run.txt` — `echo hello` + hostname transcript
 - `.github/workflows/main.yml` — Ubuntu CI
 
 ## Prerequisites

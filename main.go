@@ -63,9 +63,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Skip root check for "child" (runs inside the container namespaces)
-	// and for explicit rootless/unprivileged mode used by tests.
-	if os.Args[1] != "child" && os.Geteuid() != 0 && !allowUnprivileged() {
+	// Skip root check for "child" (runs inside the container namespaces),
+	// "reap" (detached supervisor spawned by a privileged run), and for
+	// explicit rootless/unprivileged mode used by tests.
+	if os.Args[1] != "child" && os.Args[1] != "reap" && os.Geteuid() != 0 && !allowUnprivileged() {
 		fmt.Println("Error: This program must be run with sudo/root permissions")
 		fmt.Println("Hint: set GOCKER_ALLOW_UNPRIVILEGED=1 or pass --rootless to exercise user namespaces without root")
 		os.Exit(1)
@@ -76,6 +77,12 @@ func main() {
 		run()
 	case "child":
 		child()
+	case "reap":
+		if len(os.Args) < 3 {
+			fmt.Println("Error: container ID required")
+			os.Exit(1)
+		}
+		reapContainer(os.Args[2])
 	case "ps":
 		listContainers()
 	case "stop":
@@ -340,24 +347,41 @@ func updateContainerStatus(containerID string, status string) error {
 // IPAM (IP Address Management)
 // ============================================================================
 
-// loadIPAM loads the IPAM state from disk
-func loadIPAM() (*IPAMState, error) {
+// lockIPAMFile opens ipam.json and takes an exclusive flock, matching
+// container state files so concurrent allocate/release cannot race.
+func lockIPAMFile() (*os.File, error) {
 	if err := ensureStateDir(); err != nil {
 		return nil, err
 	}
-
-	data, err := os.ReadFile(ipamFile)
-	if os.IsNotExist(err) {
-		// Initialize new IPAM state
-		return &IPAMState{
-			AllocatedIPs: make(map[string]string),
-			NextIP:       2, // Start at 10.0.0.2
-		}, nil
+	f, err := os.OpenFile(ipamFile, os.O_RDWR|os.O_CREATE, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open IPAM file: %v", err)
 	}
+	if err := lockFile(f); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("failed to lock IPAM file: %v", err)
+	}
+	return f, nil
+}
+
+func emptyIPAM() *IPAMState {
+	return &IPAMState{
+		AllocatedIPs: make(map[string]string),
+		NextIP:       2, // Start at 10.0.0.2
+	}
+}
+
+func readIPAMFile(f *os.File) (*IPAMState, error) {
+	if _, err := f.Seek(0, 0); err != nil {
+		return nil, fmt.Errorf("failed to seek IPAM file: %v", err)
+	}
+	data, err := io.ReadAll(f)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read IPAM file: %v", err)
 	}
-
+	if len(data) == 0 {
+		return emptyIPAM(), nil
+	}
 	var state IPAMState
 	if err := json.Unmarshal(data, &state); err != nil {
 		return nil, fmt.Errorf("failed to parse IPAM state: %v", err)
@@ -365,74 +389,140 @@ func loadIPAM() (*IPAMState, error) {
 	if state.AllocatedIPs == nil {
 		state.AllocatedIPs = make(map[string]string)
 	}
+	if state.NextIP < 2 {
+		state.NextIP = 2
+	}
 	return &state, nil
 }
 
-// saveIPAM saves the IPAM state to disk
-func saveIPAM(state *IPAMState) error {
-	if err := ensureStateDir(); err != nil {
-		return err
-	}
-
+func writeIPAMFile(f *os.File, state *IPAMState) error {
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal IPAM state: %v", err)
 	}
-
-	if err := os.WriteFile(ipamFile, data, 0644); err != nil {
+	if err := f.Truncate(0); err != nil {
+		return fmt.Errorf("failed to truncate IPAM file: %v", err)
+	}
+	if _, err := f.Seek(0, 0); err != nil {
+		return fmt.Errorf("failed to seek IPAM file: %v", err)
+	}
+	if _, err := f.Write(data); err != nil {
 		return fmt.Errorf("failed to write IPAM file: %v", err)
+	}
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("failed to sync IPAM file: %v", err)
 	}
 	return nil
 }
 
+// loadIPAM loads the IPAM state from disk (short lock for a consistent snapshot).
+func loadIPAM() (*IPAMState, error) {
+	f, err := lockIPAMFile()
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	defer unlockFile(f)
+	return readIPAMFile(f)
+}
+
+// saveIPAM saves the IPAM state to disk under flock.
+func saveIPAM(state *IPAMState) error {
+	f, err := lockIPAMFile()
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	defer unlockFile(f)
+	if state.AllocatedIPs == nil {
+		state.AllocatedIPs = make(map[string]string)
+	}
+	return writeIPAMFile(f, state)
+}
+
+func ipAllocated(ipam *IPAMState, ip string) bool {
+	for _, allocatedIP := range ipam.AllocatedIPs {
+		if allocatedIP == ip {
+			return true
+		}
+	}
+	return false
+}
+
+// findFreeIP picks the next unused address in 10.0.0.2–.254.
+// Walks from NextIP through 254, then scans 2–254 for holes after wrap.
+func findFreeIP(ipam *IPAMState) (ip string, octet int, ok bool) {
+	start := ipam.NextIP
+	if start < 2 {
+		start = 2
+	}
+	for octet = start; octet <= 254; octet++ {
+		ip = fmt.Sprintf("10.0.0.%d", octet)
+		if !ipAllocated(ipam, ip) {
+			return ip, octet, true
+		}
+	}
+	for octet = 2; octet <= 254; octet++ {
+		ip = fmt.Sprintf("10.0.0.%d", octet)
+		if !ipAllocated(ipam, ip) {
+			return ip, octet, true
+		}
+	}
+	return "", 0, false
+}
+
 // allocateIP allocates an IP address for a container
 func allocateIP(containerID string) (string, error) {
-	ipam, err := loadIPAM()
+	f, err := lockIPAMFile()
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	defer unlockFile(f)
+
+	ipam, err := readIPAMFile(f)
 	if err != nil {
 		return "", err
 	}
 
-	// Check if container already has an IP
 	if ip, exists := ipam.AllocatedIPs[containerID]; exists {
 		return ip, nil
 	}
 
-	// Find next available IP
-	for ipam.NextIP <= 254 {
-		ip := fmt.Sprintf("10.0.0.%d", ipam.NextIP)
-
-		// Check if IP is already allocated
-		inUse := false
-		for _, allocatedIP := range ipam.AllocatedIPs {
-			if allocatedIP == ip {
-				inUse = true
-				break
-			}
-		}
-
-		if !inUse {
-			ipam.AllocatedIPs[containerID] = ip
-			ipam.NextIP++
-			if err := saveIPAM(ipam); err != nil {
-				return "", err
-			}
-			return ip, nil
-		}
-		ipam.NextIP++
+	ip, octet, ok := findFreeIP(ipam)
+	if !ok {
+		return "", fmt.Errorf("no available IP addresses in pool")
 	}
-
-	return "", fmt.Errorf("no available IP addresses in pool")
+	ipam.AllocatedIPs[containerID] = ip
+	ipam.NextIP = octet + 1
+	if err := writeIPAMFile(f, ipam); err != nil {
+		return "", err
+	}
+	return ip, nil
 }
 
 // releaseIP releases an IP address for a container
 func releaseIP(containerID string) error {
-	ipam, err := loadIPAM()
+	f, err := lockIPAMFile()
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	defer unlockFile(f)
+
+	ipam, err := readIPAMFile(f)
 	if err != nil {
 		return err
 	}
 
 	delete(ipam.AllocatedIPs, containerID)
-	return saveIPAM(ipam)
+	if err := writeIPAMFile(f, ipam); err != nil {
+		return err
+	}
+	if len(ipam.AllocatedIPs) == 0 {
+		teardownNATRules()
+	}
+	return nil
 }
 
 // ============================================================================
@@ -443,9 +533,13 @@ func releaseIP(containerID string) error {
 func ensureBridge() error {
 	// Check if bridge already exists
 	if _, err := net.InterfaceByName(bridgeName); err == nil {
-		// Bridge exists, verify it's up
+		// Bridge exists, verify it's up and restore NAT if we tore it down
+		// when the last container exited.
 		cmd := exec.Command("ip", "link", "set", bridgeName, "up")
 		cmd.Run() // Ignore error, bridge might already be up
+		if err := setupNATRules(); err != nil {
+			fmt.Fprintf(os.Stderr, "  - Warning: Failed to set up NAT: %v\n", err)
+		}
 		return nil
 	}
 
@@ -521,6 +615,18 @@ func setupNATRules() error {
 	}
 
 	return nil
+}
+
+// teardownNATRules deletes the MASQUERADE/FORWARD rules installed by setupNATRules.
+// Idempotent: missing rules are ignored. Called when the last allocated IP is released.
+func teardownNATRules() {
+	defaultInterface, err := getDefaultInterface()
+	if err != nil {
+		return
+	}
+	exec.Command("iptables", "-t", "nat", "-D", "POSTROUTING", "-s", containerNet, "-o", defaultInterface, "-j", "MASQUERADE").Run()
+	exec.Command("iptables", "-D", "FORWARD", "-i", bridgeName, "-o", defaultInterface, "-j", "ACCEPT").Run()
+	exec.Command("iptables", "-D", "FORWARD", "-i", defaultInterface, "-o", bridgeName, "-j", "ACCEPT").Run()
 }
 
 // setupContainerNetwork creates a veth pair and connects it to the bridge
@@ -976,6 +1082,9 @@ func run() {
 	if detached {
 		fmt.Printf("Container started with ID: %s\n", containerID)
 		fmt.Printf("Use 'gocker logs %s' to view logs\n", containerID)
+		if err := startDetachedReaper(containerID); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: Failed to start detached reaper: %v\n", err)
+		}
 		return
 	}
 
@@ -1051,6 +1160,12 @@ func child() {
 	fmt.Fprintln(os.Stderr, "Setting hostname to 'gocker-container'...")
 	must(syscall.Sethostname([]byte("gocker-container")))
 
+	// Alpine docker-export rootfs has no /dev/null or /dev/zero. Background
+	// jobs (and pids.max tests) need them inside the jail — create before chroot.
+	if err := ensureJailDevices(rootfsPath); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: Failed to set up jail device nodes: %v\n", err)
+	}
+
 	// Create filesystem jail using chroot
 	fmt.Fprintf(os.Stderr, "Creating filesystem jail with chroot (%s)...\n", rootfsPath)
 	must(syscall.Chroot(rootfsPath))
@@ -1090,6 +1205,106 @@ func child() {
 	}
 
 	must(cmd.Run())
+}
+
+// linuxMkdev encodes a device number for mknod(2) (new_encode_dev).
+func linuxMkdev(major, minor uint32) int {
+	return int((minor & 0xff) | (major << 8) | ((minor &^ 0xff) << 12))
+}
+
+func isCharDevice(path string) bool {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
+}
+
+// ensureJailDevices creates /dev/null and /dev/zero in the rootfs before chroot.
+// Prefer mknod so the shared Alpine rootfs keeps the nodes; bind-mount host
+// devices if mknod is blocked (nodev). Mounts are made private first so a
+// bind does not leak onto the host.
+func ensureJailDevices(rootfsPath string) error {
+	if err := syscall.Mount("", "/", "", syscall.MS_REC|syscall.MS_PRIVATE, ""); err != nil {
+		// Non-fatal: some environments reject remounting /.
+		fmt.Fprintf(os.Stderr, "  - Note: MS_PRIVATE on /: %v\n", err)
+	}
+
+	devDir := filepath.Join(rootfsPath, "dev")
+	if err := os.MkdirAll(devDir, 0755); err != nil {
+		return fmt.Errorf("mkdir %s: %v", devDir, err)
+	}
+
+	nodes := []struct {
+		name         string
+		major, minor uint32
+	}{
+		{"null", 1, 3},
+		{"zero", 1, 5},
+	}
+	for _, n := range nodes {
+		dest := filepath.Join(devDir, n.name)
+		if isCharDevice(dest) {
+			continue
+		}
+		_ = os.Remove(dest)
+		if err := syscall.Mknod(dest, syscall.S_IFCHR|0666, linuxMkdev(n.major, n.minor)); err != nil {
+			f, createErr := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY, 0666)
+			if createErr != nil && !os.IsExist(createErr) {
+				return fmt.Errorf("%s: mknod: %v; create: %v", dest, err, createErr)
+			}
+			if f != nil {
+				f.Close()
+			}
+			host := filepath.Join("/dev", n.name)
+			if bindErr := syscall.Mount(host, dest, "", syscall.MS_BIND, ""); bindErr != nil {
+				return fmt.Errorf("%s: mknod (%v) and bind-mount (%v) failed", dest, err, bindErr)
+			}
+			continue
+		}
+		_ = os.Chmod(dest, 0666)
+	}
+	return nil
+}
+
+// startDetachedReaper launches a session-leader helper that waits for the
+// container PID to exit, then updates status and releases veth/cgroup/IP.
+func startDetachedReaper(containerID string) error {
+	exe, err := os.Executable()
+	if err != nil {
+		exe = "/proc/self/exe"
+	}
+	cmd := exec.Command(exe, "reap", containerID)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.Stdin = nil
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	return cmd.Start()
+}
+
+// reapContainer polls until the container process is gone, then cleans up.
+func reapContainer(containerID string) {
+	state, err := loadContainerState(containerID)
+	if err != nil {
+		return
+	}
+	pid := state.PID
+	for {
+		if err := syscall.Kill(pid, 0); err != nil {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	state, err = loadContainerState(containerID)
+	if err != nil {
+		return
+	}
+	if state.Status == "running" {
+		_ = updateContainerStatus(state.ID, "exited")
+	}
+	cleanupContainerNetwork(state.ID, state.VethHost)
+	cleanupContainerCgroup(state.CgroupPath)
 }
 
 // configureContainerNetwork sets up the network interface inside the container
@@ -1297,12 +1512,14 @@ func listContainers() {
 			continue
 		}
 
-		// Check if process is still running
+		// Check if process is still running; if not, reap leaks (veth/IP/cgroup).
 		status := state.Status
 		if status == "running" {
 			if err := syscall.Kill(state.PID, 0); err != nil {
 				status = "exited"
 				updateContainerStatus(containerID, "exited")
+				cleanupContainerNetwork(containerID, state.VethHost)
+				cleanupContainerCgroup(state.CgroupPath)
 			}
 		}
 

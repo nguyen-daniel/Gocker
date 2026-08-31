@@ -1,0 +1,57 @@
+Gocker demo transcript
+======================
+
+Captured to match what CI already asserts:
+  TestGockerRun              → command inside the jail succeeds
+  TestGockerRunWithHostname  → hostname is "gocker-container"
+
+This file was written on Windows (no Linux namespaces / chroot), so it is a
+faithful transcript of the messages main.go prints plus the two command
+outputs CI checks — not a live capture from this machine.
+
+Regenerate on Linux (or GitHub Actions ubuntu-latest)
+-----------------------------------------------------
+
+  git clone https://github.com/nguyen-daniel/Gocker.git
+  cd Gocker
+  make setup
+  make build
+  sudo ./gocker run /bin/busybox echo hello
+  sudo ./gocker run /bin/hostname
+
+sudo ./gocker run /bin/busybox echo hello
+-----------------------------------------
+
+Setting up cgroups v2 for resource limits...
+  - Process limit set to 20
+Running [/bin/busybox echo hello] as PID 1
+Creating isolated namespaces...
+  - UTS namespace (hostname isolation)
+  - PID namespace (process ID isolation)
+  - Mount namespace (filesystem isolation)
+  - Network namespace (network isolation)
+  - Running as root (user namespace not enabled; 4 namespaces)
+  - Child PID: 1234
+Setting up network namespace...
+  - Creating veth pair: veth........ <-> vethc.......
+  - Moving vethc....... into container namespace (IP: 10.0.0.2)
+  - Network setup complete
+Running in child process with PID 1
+Container UID: 0, GID: 0
+Configuring container network...
+  - Found container veth interface: vethc.......
+  - Container IP: 10.0.0.2
+  - Network configuration complete
+Setting hostname to 'gocker-container'...
+Creating filesystem jail with chroot (.../rootfs)...
+Mounting proc filesystem...
+Executing command: /bin/busybox [echo hello]
+hello
+
+sudo ./gocker run /bin/hostname
+-------------------------------
+
+(same setup lines as above, then)
+
+Executing command: /bin/hostname []
+gocker-container
