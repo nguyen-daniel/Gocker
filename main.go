@@ -63,14 +63,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Skip root check for "child" command
-	// "child" runs in a user namespace where it appears as non-root
-	if os.Args[1] != "child" {
-		// Check for root permissions (required for namespace operations)
-		if os.Geteuid() != 0 {
-			fmt.Println("Error: This program must be run with sudo/root permissions")
-			os.Exit(1)
-		}
+	// Skip root check for "child" (runs inside the container namespaces)
+	// and for explicit rootless/unprivileged mode used by tests.
+	if os.Args[1] != "child" && os.Geteuid() != 0 && !allowUnprivileged() {
+		fmt.Println("Error: This program must be run with sudo/root permissions")
+		fmt.Println("Hint: set GOCKER_ALLOW_UNPRIVILEGED=1 or pass --rootless to exercise user namespaces without root")
+		os.Exit(1)
 	}
 
 	switch os.Args[1] {
@@ -124,6 +122,44 @@ func printUsage() {
 	fmt.Println("  --volume, -v <host:container>  Mount a host directory into the container")
 	fmt.Println("  --detach, -d              Run container in background")
 	fmt.Println("  --rootfs <path>           Path to rootfs directory (default: ./rootfs)")
+	fmt.Println("  --rootless                Allow unprivileged run (user namespace; network/cgroups may fail)")
+}
+
+// allowUnprivileged reports whether the CLI may run without euid 0.
+// Used to test the user-namespace path in CI without a full rootful stack.
+func allowUnprivileged() bool {
+	if os.Getenv("GOCKER_ALLOW_UNPRIVILEGED") == "1" {
+		return true
+	}
+	for _, arg := range os.Args[2:] {
+		if arg == "--rootless" {
+			return true
+		}
+	}
+	return false
+}
+
+// namespaceSysProcAttr builds clone flags for the container child.
+// Default (rootful) path: 4 namespaces — UTS, PID, mount, network.
+// User namespace is optional: enabled when not root, or --rootless /
+// GOCKER_ALLOW_UNPRIVILEGED=1, with uid/gid maps (container 0 -> host euid).
+func namespaceSysProcAttr(includeUser bool) *syscall.SysProcAttr {
+	flags := syscall.CLONE_NEWUTS | syscall.CLONE_NEWPID | syscall.CLONE_NEWNS | syscall.CLONE_NEWNET
+	attr := &syscall.SysProcAttr{Cloneflags: uintptr(flags)}
+	if includeUser {
+		attr.Cloneflags |= syscall.CLONE_NEWUSER
+		attr.UidMappings = []syscall.SysProcIDMap{
+			{ContainerID: 0, HostID: os.Geteuid(), Size: 1},
+		}
+		attr.GidMappings = []syscall.SysProcIDMap{
+			{ContainerID: 0, HostID: os.Getegid(), Size: 1},
+		}
+	}
+	return attr
+}
+
+func hasCloneFlag(flags uintptr, flag uintptr) bool {
+	return flags&flag == flag
 }
 
 // generateContainerID generates a unique container ID
@@ -777,6 +813,9 @@ func run() {
 			}
 		} else if arg == "--detach" || arg == "-d" {
 			detached = true
+		} else if arg == "--rootless" {
+			// Consumed here so it is not treated as the container command.
+			// Root check is handled in main() via allowUnprivileged().
 		} else if arg == "--rootfs" {
 			if i+1 < len(args) {
 				rootfsPath = args[i+1]
@@ -845,7 +884,11 @@ func run() {
 	fmt.Fprintln(os.Stderr, "  - PID namespace (process ID isolation)")
 	fmt.Fprintln(os.Stderr, "  - Mount namespace (filesystem isolation)")
 	fmt.Fprintln(os.Stderr, "  - Network namespace (network isolation)")
-	fmt.Fprintln(os.Stderr, "  - User namespace (user ID isolation)")
+
+	includeUser := os.Geteuid() != 0 || allowUnprivileged()
+	if includeUser {
+		fmt.Fprintln(os.Stderr, "  - User namespace (optional; uid/gid mapped)")
+	}
 
 	cmd := exec.Command("/proc/self/exe", append([]string{"child"}, remainingArgs...)...)
 
@@ -860,30 +903,11 @@ func run() {
 		cmd.Stderr = io.MultiWriter(logWriter, os.Stderr)
 	}
 
-	// Set up namespace cloneflags
-	// When running as root, skip user namespace (not needed and complicates chroot)
-	// User namespaces are primarily useful for unprivileged/rootless containers
-	cloneFlags := syscall.CLONE_NEWUTS | syscall.CLONE_NEWPID | syscall.CLONE_NEWNS | syscall.CLONE_NEWNET
-
-	if os.Geteuid() == 0 {
-		// Running as root - no user namespace needed
-		cmd.SysProcAttr = &syscall.SysProcAttr{
-			Cloneflags: uintptr(cloneFlags),
-		}
-		fmt.Fprintln(os.Stderr, "  - Running as root (no user namespace needed)")
+	cmd.SysProcAttr = namespaceSysProcAttr(includeUser)
+	if includeUser {
+		fmt.Fprintf(os.Stderr, "  - User namespace: mapping container UID 0 -> host UID %d\n", os.Geteuid())
 	} else {
-		// Running unprivileged - use user namespace with mapping
-		cloneFlags |= syscall.CLONE_NEWUSER
-		cmd.SysProcAttr = &syscall.SysProcAttr{
-			Cloneflags: uintptr(cloneFlags),
-			UidMappings: []syscall.SysProcIDMap{
-				{ContainerID: 0, HostID: os.Getuid(), Size: 1},
-			},
-			GidMappings: []syscall.SysProcIDMap{
-				{ContainerID: 0, HostID: os.Getgid(), Size: 1},
-			},
-		}
-		fmt.Fprintf(os.Stderr, "  - User namespace: mapping container UID 0 -> host UID %d\n", os.Getuid())
+		fmt.Fprintln(os.Stderr, "  - Running as root (user namespace not enabled; 4 namespaces)")
 	}
 
 	// Start the command

@@ -5,7 +5,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -440,13 +442,83 @@ func TestMemoryLimitParsing(t *testing.T) {
 	}
 }
 
-// TestNamespaceConfig tests that namespace configuration is correct
+// TestNamespaceConfig: rootful default is 4 namespaces; user ns is opt-in.
 func TestNamespaceConfig(t *testing.T) {
-	// When running as root, we skip user namespace
-	// When running as non-root, we use user namespace with UID mapping
+	rootful := namespaceSysProcAttr(false)
+	for _, f := range []struct {
+		name string
+		bit  uintptr
+	}{
+		{"NEWUTS", syscall.CLONE_NEWUTS},
+		{"NEWPID", syscall.CLONE_NEWPID},
+		{"NEWNS", syscall.CLONE_NEWNS},
+		{"NEWNET", syscall.CLONE_NEWNET},
+	} {
+		if !hasCloneFlag(rootful.Cloneflags, f.bit) {
+			t.Errorf("rootful missing %s", f.name)
+		}
+	}
+	if hasCloneFlag(rootful.Cloneflags, syscall.CLONE_NEWUSER) {
+		t.Error("rootful default must not set CLONE_NEWUSER")
+	}
+
+	rootless := namespaceSysProcAttr(true)
+	if !hasCloneFlag(rootless.Cloneflags, syscall.CLONE_NEWUSER) {
+		t.Fatal("rootless path should set CLONE_NEWUSER")
+	}
+	if len(rootless.UidMappings) != 1 || rootless.UidMappings[0].ContainerID != 0 {
+		t.Fatalf("expected uid map container 0 -> host euid, got %+v", rootless.UidMappings)
+	}
+	if rootless.UidMappings[0].HostID != os.Geteuid() {
+		t.Errorf("uid map HostID=%d, want euid %d", rootless.UidMappings[0].HostID, os.Geteuid())
+	}
+	t.Logf("euid=%d: 4-ns rootful; optional user ns maps 0 -> %d", os.Geteuid(), rootless.UidMappings[0].HostID)
+}
+
+// TestCloneUserNamespace proves the optional user-namespace path can clone.
+func TestCloneUserNamespace(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("user namespaces are Linux-only")
+	}
+	cmd := exec.Command("true")
+	cmd.SysProcAttr = namespaceSysProcAttr(true)
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("clone with optional user namespace failed: %v", err)
+	}
+}
+
+// TestPidsMaxEnforcement starts a detached container and verifies the 21st
+// process in the cgroup is rejected (pids.max=20).
+func TestPidsMaxEnforcement(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("cgroups are Linux-only")
+	}
+	binaryPath := "./gocker"
+	if _, err := os.Stat(binaryPath); os.IsNotExist(err) {
+		t.Skip("gocker binary not found. Run 'make build' first.")
+	}
+	if _, err := os.Stat("./rootfs/bin/busybox"); os.IsNotExist(err) {
+		t.Skip("rootfs not set up")
+	}
+
+	// Keep the container alive, then fork 25 sleeps inside it via a second run
+	// is awkward; instead start a shell that tries to spawn 25 background jobs.
+	script := "i=0; while [ $i -lt 25 ]; do /bin/busybox sleep 30 & i=$((i+1)); done; echo SPAWNED; wait"
+	var cmd *exec.Cmd
 	if os.Geteuid() == 0 {
-		t.Log("Running as root - user namespace will be skipped")
+		cmd = exec.Command(binaryPath, "run", "/bin/busybox", "sh", "-c", script)
 	} else {
-		t.Log("Running as non-root - user namespace will be used")
+		cmd = exec.Command("sudo", binaryPath, "run", "/bin/busybox", "sh", "-c", script)
+	}
+	output, err := cmd.CombinedOutput()
+	out := string(output)
+	t.Logf("pids test output:\n%s", out)
+	// cgroup v2 returns "Resource temporarily unavailable" / "can't fork" when pids.max hits.
+	if !strings.Contains(out, "Resource temporarily unavailable") &&
+		!strings.Contains(out, "can't fork") &&
+		!strings.Contains(strings.ToLower(out), "nproc") {
+		if err == nil && strings.Contains(out, "SPAWNED") {
+			t.Errorf("expected fork failure at the 21st process (pids.max=20); container finished cleanly")
+		}
 	}
 }

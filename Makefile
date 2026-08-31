@@ -1,4 +1,4 @@
-.PHONY: build test setup run clean
+.PHONY: build test setup run clean bench test-unprivileged
 
 BINARY_NAME=gocker
 ROOTFS_DIR=rootfs
@@ -44,6 +44,15 @@ test: build setup
 run: build $(ROOTFS_DIR)
 	@echo "Running $(BINARY_NAME)..."
 	@sudo ./$(BINARY_NAME) run /bin/sh
+
+# Unprivileged unit tests (user-namespace clone flags; no sudo).
+test-unprivileged: build
+	@echo "Running namespace unit tests without sudo..."
+	@GOCKER_ALLOW_UNPRIVILEGED=1 go test -v -run 'TestNamespaceConfig|TestCloneUserNamespace|TestCPULimitParsing|TestMemoryLimitParsing'
+
+# Startup benchmark vs docker (Linux + sudo). Writes docs/BENCHMARKS.md.
+bench: build setup
+	@N=$${N:-20} ./scripts/bench_startup.sh
 
 clean:
 	@echo "Cleaning up..."
