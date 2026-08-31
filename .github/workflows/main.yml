@@ -22,7 +22,7 @@ jobs:
     
     - name: Set up Docker
       # Docker is required for the setup target which uses docker export
-      # to create the Alpine rootfs needed for chroot-based filesystem isolation
+      # to create the Alpine rootfs used as the OverlayFS lower layer
       uses: docker/setup-buildx-action@v3
     
     - name: Configure sudo for testing
@@ -35,9 +35,11 @@ jobs:
         sudo visudo -cf /etc/sudoers.d/$RUNNER_USER
     
     - name: Run setup
-      # Setup downloads and extracts Alpine rootfs using docker export
-      # The rootfs is necessary for chroot to create filesystem isolation
-      run: make setup
+      # Setup downloads and extracts Alpine rootfs using docker export.
+      # The rootfs is the shared OverlayFS lower layer for each container.
+      run: |
+        sudo modprobe overlay
+        make setup
     
     - name: Unprivileged user-namespace tests
       # Optional user-namespace path (not the rootful 4-ns default).
@@ -47,10 +49,18 @@ jobs:
       # Tests must run with sudo because:
       # 1. Linux namespaces (CLONE_NEWUTS, CLONE_NEWPID, CLONE_NEWNS) require root
       # 2. Cgroups v2 operations require root to create directories and write limits
-      # 3. Chroot operations require root to change the root filesystem
+      # 3. OverlayFS mount and pivot_root require root
       # Without sudo, the container isolation features cannot function
       run: sudo make test
 
     - name: Startup benchmark
       run: sudo make bench
+
+    - name: Upload startup bench JSON
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: startup-bench
+        path: docs/startup_bench.json
+        if-no-files-found: ignore
 

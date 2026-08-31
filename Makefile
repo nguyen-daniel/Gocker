@@ -12,14 +12,13 @@ build:
 	@echo "Build complete: $(BINARY_NAME)"
 
 # Setup downloads and extracts a mini-Alpine rootfs using docker export
-# This is necessary because Gocker uses chroot to create filesystem isolation
-# The rootfs provides a minimal Linux environment inside the container
+# This is the shared OverlayFS lower layer; each container gets its own upper/work
 setup: $(ROOTFS_DIR)
 	@echo "Rootfs is already set up at $(ROOTFS_DIR)/"
 
 $(ROOTFS_DIR):
 	@echo "Rootfs directory not found. Setting up Alpine Linux rootfs using Docker..."
-	@echo "Note: Rootfs is required for chroot-based filesystem isolation"
+	@echo "Note: Rootfs is the shared OverlayFS lower layer for filesystem isolation"
 	@mkdir -p $(ROOTFS_DIR)
 	@echo "Pulling Alpine image..."
 	@docker pull $(ALPINE_IMAGE) > /dev/null 2>&1 || true
