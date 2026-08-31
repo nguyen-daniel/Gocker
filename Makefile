@@ -48,7 +48,7 @@ run: build $(ROOTFS_DIR)
 # Unprivileged unit tests (user-namespace clone flags; no sudo).
 test-unprivileged: build
 	@echo "Running namespace unit tests without sudo..."
-	@GOCKER_ALLOW_UNPRIVILEGED=1 go test -v -run 'TestNamespaceConfig|TestCloneUserNamespace|TestCPULimitParsing|TestMemoryLimitParsing'
+	@GOCKER_ALLOW_UNPRIVILEGED=1 go test -v -run 'TestNamespaceConfig|TestCloneUserNamespace|TestCPULimitParsing|TestMemoryLimitParsing|TestFindFreeIP'
 
 # Startup benchmark vs docker (Linux + sudo). Writes docs/BENCHMARKS.md.
 bench: build setup
