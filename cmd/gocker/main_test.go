@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"gocker/internal/ns"
 	"gocker/internal/state"
 )
 
@@ -58,8 +59,44 @@ func stopAndRemove(containerID string) {
 	if containerID == "" {
 		return
 	}
-	_ = gockerCommand("stop", containerID).Run()
-	_ = gockerCommand("rm", containerID).Run()
+	_ = gockerCommand("rm", "-f", containerID).Run()
+}
+
+func waitUntil(timeout time.Duration, fn func() bool) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if fn() {
+			return true
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return false
+}
+
+func overlayDir(containerID string) string {
+	return filepath.Join(state.ContainersDir, containerID)
+}
+
+func stateFile(containerID string) string {
+	return filepath.Join(state.ContainersDir, containerID+".json")
+}
+
+func parseCPUStat(data []byte) (usageUsec, nrThrottled int64) {
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		var v int64
+		fmt.Sscanf(fields[1], "%d", &v)
+		switch fields[0] {
+		case "usage_usec":
+			usageUsec = v
+		case "nr_throttled":
+			nrThrottled = v
+		}
+	}
+	return
 }
 
 func TestGockerRun(t *testing.T) {
@@ -80,9 +117,9 @@ func TestGockerRun(t *testing.T) {
 
 	var cmd *exec.Cmd
 	if os.Geteuid() == 0 {
-		cmd = exec.Command(binaryPath, "run", "/bin/busybox", "true")
+		cmd = exec.Command(binaryPath, "run", "--network=none", "/bin/busybox", "true")
 	} else {
-		cmd = exec.Command("sudo", binaryPath, "run", "/bin/busybox", "true")
+		cmd = exec.Command("sudo", binaryPath, "run", "--network=none", "/bin/busybox", "true")
 	}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -106,9 +143,9 @@ func TestGockerRunWithHostname(t *testing.T) {
 
 	var cmd *exec.Cmd
 	if os.Geteuid() == 0 {
-		cmd = exec.Command(binaryPath, "run", "/bin/hostname")
+		cmd = exec.Command(binaryPath, "run", "--network=none", "/bin/hostname")
 	} else {
-		cmd = exec.Command("sudo", binaryPath, "run", "/bin/hostname")
+		cmd = exec.Command("sudo", binaryPath, "run", "--network=none", "/bin/hostname")
 	}
 	output, err := cmd.Output()
 	if err != nil {
@@ -125,7 +162,7 @@ func TestGockerRunWithHostname(t *testing.T) {
 func TestPerContainerCgroup(t *testing.T) {
 	requireLinuxRuntime(t)
 
-	cmd := gockerCommand("run", "-d", "/bin/busybox", "sleep", "10")
+	cmd := gockerCommand("run", "-d", "--network=none", "/bin/busybox", "sleep", "10")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("Failed to start container: %v\nOutput: %s", err, output)
@@ -263,9 +300,9 @@ func TestPidsMaxEnforcement(t *testing.T) {
 	script := "i=0; while [ $i -lt 25 ]; do /bin/busybox sleep 30 & i=$((i+1)); done; echo SPAWNED; wait"
 	var cmd *exec.Cmd
 	if os.Geteuid() == 0 {
-		cmd = exec.Command(binaryPath, "run", "/bin/busybox", "sh", "-c", script)
+		cmd = exec.Command(binaryPath, "run", "--network=none", "/bin/busybox", "sh", "-c", script)
 	} else {
-		cmd = exec.Command("sudo", binaryPath, "run", "/bin/busybox", "sh", "-c", script)
+		cmd = exec.Command("sudo", binaryPath, "run", "--network=none", "/bin/busybox", "sh", "-c", script)
 	}
 	output, err := cmd.CombinedOutput()
 	out := string(output)
@@ -285,7 +322,7 @@ func TestDetachedSurvivesParentExit(t *testing.T) {
 	requireLinuxRuntime(t)
 
 	start := time.Now()
-	cmd := gockerCommand("run", "-d", "/bin/busybox", "sleep", "15")
+	cmd := gockerCommand("run", "-d", "--network=none", "/bin/busybox", "sleep", "15")
 	output, err := cmd.CombinedOutput()
 	elapsed := time.Since(start)
 	if err != nil {
@@ -334,7 +371,7 @@ func TestOverlayWriteIsolation(t *testing.T) {
 	lowerPath := filepath.Join("rootfs", marker)
 	_ = os.Remove(lowerPath)
 
-	writeCmd := gockerCommand("run", "/bin/busybox", "sh", "-c", "echo from-a > /"+marker)
+	writeCmd := gockerCommand("run", "--network=none", "/bin/busybox", "sh", "-c", "echo from-a > /"+marker)
 	if output, err := writeCmd.CombinedOutput(); err != nil {
 		t.Fatalf("container A write failed: %v\nOutput: %s", err, output)
 	}
@@ -351,7 +388,7 @@ func TestOverlayWriteIsolation(t *testing.T) {
 		t.Logf("marker landed in %s", uppers[0])
 	}
 
-	checkCmd := gockerCommand("run", "/bin/busybox", "sh", "-c",
+	checkCmd := gockerCommand("run", "--network=none", "/bin/busybox", "sh", "-c",
 		fmt.Sprintf("if [ -f /%s ]; then echo LEAK; exit 1; else echo ISOLATED; fi", marker))
 	output, err := checkCmd.CombinedOutput()
 	out := string(output)
@@ -360,5 +397,527 @@ func TestOverlayWriteIsolation(t *testing.T) {
 	}
 	if !strings.Contains(out, "ISOLATED") {
 		t.Errorf("container B should not see A's write; got:\n%s", out)
+	}
+}
+
+func TestParseRunFlags(t *testing.T) {
+	opt, err := parseRunFlags([]string{
+		"-d", "-q", "--name", "web", "--network=none",
+		"-v", "/tmp/data:/data", "--cpu-limit", "0.5", "--memory-limit", "32M",
+		"/bin/busybox", "echo", "hi",
+	})
+	if err != nil {
+		t.Fatalf("parseRunFlags: %v", err)
+	}
+	if !opt.detached || !opt.quiet || opt.name != "web" || opt.network != "none" {
+		t.Errorf("flags: %+v", opt)
+	}
+	if opt.cpuLimit != "0.5" || opt.memoryLimit != "32M" {
+		t.Errorf("limits: cpu=%q mem=%q", opt.cpuLimit, opt.memoryLimit)
+	}
+	if len(opt.volumes) != 1 || opt.volumes[0] != "/tmp/data:/data" {
+		t.Errorf("volumes: %v", opt.volumes)
+	}
+	if strings.Join(opt.command, " ") != "/bin/busybox echo hi" {
+		t.Errorf("command: %v", opt.command)
+	}
+
+	_, err = parseRunFlags([]string{"--network", "host", "true"})
+	if err == nil {
+		t.Fatal("expected error for --network=host")
+	}
+}
+
+func TestUnknownNetworkMode(t *testing.T) {
+	if _, err := os.Stat("./gocker"); os.IsNotExist(err) {
+		t.Skip("gocker binary not found. Run 'make build' first.")
+	}
+	cmd := exec.Command("./gocker", "run", "--rootless", "--network", "host", "/bin/true")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected failure for --network=host; got:\n%s", out)
+	}
+	if !strings.Contains(string(out), "network") {
+		t.Errorf("expected a network-mode error, got:\n%s", out)
+	}
+}
+
+func TestStopSetsStopped(t *testing.T) {
+	requireLinuxRuntime(t)
+
+	cmd := gockerCommand("run", "-d", "--network=none", "/bin/busybox", "sleep", "30")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("start: %v\n%s", err, output)
+	}
+	id := parseStartedContainerID(output)
+	if id == "" {
+		t.Fatalf("no container ID in:\n%s", output)
+	}
+	defer stopAndRemove(id)
+
+	if err := waitForPath(stateFile(id), 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+
+	if out, err := gockerCommand("stop", id).CombinedOutput(); err != nil {
+		t.Fatalf("stop: %v\n%s", err, out)
+	}
+
+	ctr, err := state.Load(id)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if ctr.Status != "stopped" {
+		t.Errorf("status=%q, want stopped", ctr.Status)
+	}
+	if err := syscall.Kill(ctr.PID, 0); err == nil {
+		t.Errorf("pid %d still running after stop", ctr.PID)
+	}
+}
+
+func TestRmRefusesRunningThenDeletes(t *testing.T) {
+	requireLinuxRuntime(t)
+
+	cmd := gockerCommand("run", "-d", "--network=none", "/bin/busybox", "sleep", "30")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("start: %v\n%s", err, output)
+	}
+	id := parseStartedContainerID(output)
+	if id == "" {
+		t.Fatalf("no container ID in:\n%s", output)
+	}
+	defer stopAndRemove(id)
+
+	if err := waitForPath(stateFile(id), 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := gockerCommand("rm", id).CombinedOutput()
+	if err == nil {
+		t.Fatalf("rm of running container should fail; got:\n%s", out)
+	}
+	if !strings.Contains(string(out), "running") {
+		t.Errorf("expected running-container error, got:\n%s", out)
+	}
+	if _, err := os.Stat(stateFile(id)); err != nil {
+		t.Fatalf("state should remain after refused rm: %v", err)
+	}
+
+	if out, err := gockerCommand("stop", id).CombinedOutput(); err != nil {
+		t.Fatalf("stop: %v\n%s", err, out)
+	}
+	if out, err := gockerCommand("rm", id).CombinedOutput(); err != nil {
+		t.Fatalf("rm after stop: %v\n%s", err, out)
+	}
+
+	if _, err := os.Stat(stateFile(id)); !os.IsNotExist(err) {
+		t.Errorf("state file still present: %v", err)
+	}
+	if _, err := os.Stat(overlayDir(id)); !os.IsNotExist(err) {
+		t.Errorf("overlay dir still present: %v", err)
+	}
+}
+
+func TestRmForceRunning(t *testing.T) {
+	requireLinuxRuntime(t)
+
+	cmd := gockerCommand("run", "-d", "--network=none", "/bin/busybox", "sleep", "30")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("start: %v\n%s", err, output)
+	}
+	id := parseStartedContainerID(output)
+	if id == "" {
+		t.Fatalf("no container ID in:\n%s", output)
+	}
+
+	if err := waitForPath(stateFile(id), 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := gockerCommand("rm", "-f", id).CombinedOutput(); err != nil {
+		t.Fatalf("rm -f: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(stateFile(id)); !os.IsNotExist(err) {
+		t.Errorf("state file still present after rm -f: %v", err)
+	}
+}
+
+func TestLogsContents(t *testing.T) {
+	requireLinuxRuntime(t)
+
+	marker := fmt.Sprintf("GOCKER_LOG_%d", time.Now().UnixNano())
+	cmd := gockerCommand("run", "-d", "--network=none", "/bin/busybox", "sh", "-c",
+		"echo "+marker+"; sleep 8")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("start: %v\n%s", err, output)
+	}
+	id := parseStartedContainerID(output)
+	if id == "" {
+		t.Fatalf("no container ID in:\n%s", output)
+	}
+	defer stopAndRemove(id)
+
+	if err := waitForPath(stateFile(id), 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+
+	ok := waitUntil(8*time.Second, func() bool {
+		out, err := gockerCommand("logs", id).CombinedOutput()
+		return err == nil && strings.Contains(string(out), marker)
+	})
+	if !ok {
+		out, _ := gockerCommand("logs", id).CombinedOutput()
+		t.Fatalf("logs did not contain %s; got:\n%s", marker, out)
+	}
+}
+
+func TestLogsFollow(t *testing.T) {
+	requireLinuxRuntime(t)
+
+	cmd := gockerCommand("run", "-d", "--network=none", "/bin/busybox", "sh", "-c",
+		"echo FIRST_FOLLOW; sleep 2; echo SECOND_FOLLOW")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("start: %v\n%s", err, output)
+	}
+	id := parseStartedContainerID(output)
+	if id == "" {
+		t.Fatalf("no container ID in:\n%s", output)
+	}
+	defer stopAndRemove(id)
+
+	if err := waitForPath(stateFile(id), 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+
+	logsCmd := gockerCommand("logs", "-f", id)
+	out, err := logsCmd.CombinedOutput()
+	got := string(out)
+	if err != nil {
+		t.Fatalf("logs -f: %v\n%s", err, got)
+	}
+	if !strings.Contains(got, "FIRST_FOLLOW") || !strings.Contains(got, "SECOND_FOLLOW") {
+		t.Errorf("logs -f missing output:\n%s", got)
+	}
+}
+
+func TestDetachedReaperCleansUp(t *testing.T) {
+	requireLinuxRuntime(t)
+
+	cmd := gockerCommand("run", "-d", "/bin/busybox", "sleep", "2")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("start: %v\n%s", err, output)
+	}
+	id := parseStartedContainerID(output)
+	if id == "" {
+		t.Fatalf("no container ID in:\n%s", output)
+	}
+	defer stopAndRemove(id)
+
+	if err := waitForPath(stateFile(id), 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	ctr, err := state.Load(id)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	cgroupPath := ctr.CgroupPath
+	veth := ctr.VethHost
+
+	ok := waitUntil(15*time.Second, func() bool {
+		return syscall.Kill(ctr.PID, 0) != nil
+	})
+	if !ok {
+		t.Fatalf("pid %d still running after sleep 2", ctr.PID)
+	}
+
+	ok = waitUntil(10*time.Second, func() bool {
+		latest, err := state.Load(id)
+		if err != nil {
+			return false
+		}
+		if latest.Status == "running" {
+			return false
+		}
+		if _, err := os.Stat(cgroupPath); err == nil {
+			return false
+		}
+		if veth != "" {
+			if _, err := os.Stat("/sys/class/net/" + veth); err == nil {
+				return false
+			}
+		}
+		return true
+	})
+	if !ok {
+		latest, _ := state.Load(id)
+		status := ""
+		if latest != nil {
+			status = latest.Status
+		}
+		_, cgroupErr := os.Stat(cgroupPath)
+		vethState := "none"
+		if veth != "" {
+			if _, err := os.Stat("/sys/class/net/" + veth); err == nil {
+				vethState = "still present"
+			} else {
+				vethState = "gone"
+			}
+		}
+		t.Fatalf("reaper did not clean up: status=%q cgroup_err=%v veth=%s", status, cgroupErr, vethState)
+	}
+}
+
+func TestCPUAndMemoryLimitsApplied(t *testing.T) {
+	requireLinuxRuntime(t)
+
+	cmd := gockerCommand("run", "-d", "--network=none",
+		"--cpu-limit", "0.5", "--memory-limit", "32M",
+		"/bin/busybox", "sleep", "20")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("start: %v\n%s", err, output)
+	}
+	id := parseStartedContainerID(output)
+	if id == "" {
+		t.Fatalf("no container ID in:\n%s", output)
+	}
+	defer stopAndRemove(id)
+
+	if err := waitForPath(stateFile(id), 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	ctr, err := state.Load(id)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if err := waitForPath(ctr.CgroupPath, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+
+	cpuMax, err := os.ReadFile(filepath.Join(ctr.CgroupPath, "cpu.max"))
+	if err != nil {
+		t.Skipf("cpu.max not readable (no cpu controller?): %v", err)
+	}
+	if got := strings.TrimSpace(string(cpuMax)); got != "50000 100000" {
+		t.Errorf("cpu.max=%q, want %q", got, "50000 100000")
+	}
+
+	memMax, err := os.ReadFile(filepath.Join(ctr.CgroupPath, "memory.max"))
+	if err != nil {
+		t.Skipf("memory.max not readable (no memory controller?): %v", err)
+	}
+	if got := strings.TrimSpace(string(memMax)); got != "33554432" {
+		t.Errorf("memory.max=%q, want 33554432 (32M)", got)
+	}
+}
+
+func TestCPULimitEnforcement(t *testing.T) {
+	requireLinuxRuntime(t)
+
+	cmd := gockerCommand("run", "-d", "--network=none", "--cpu-limit", "0.2",
+		"/bin/busybox", "sh", "-c", "while true; do :; done")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("start: %v\n%s", err, output)
+	}
+	id := parseStartedContainerID(output)
+	if id == "" {
+		t.Fatalf("no container ID in:\n%s", output)
+	}
+	defer stopAndRemove(id)
+
+	if err := waitForPath(stateFile(id), 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	ctr, err := state.Load(id)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	cpuMaxPath := filepath.Join(ctr.CgroupPath, "cpu.max")
+	if err := waitForPath(cpuMaxPath, 5*time.Second); err != nil {
+		t.Skipf("cpu.max not available: %v", err)
+	}
+	cpuMax, err := os.ReadFile(cpuMaxPath)
+	if err != nil {
+		t.Fatalf("read cpu.max: %v", err)
+	}
+	if got := strings.TrimSpace(string(cpuMax)); got != "20000 100000" {
+		t.Fatalf("cpu.max=%q, want 20000 100000", got)
+	}
+
+	time.Sleep(3 * time.Second)
+	statPath := filepath.Join(ctr.CgroupPath, "cpu.stat")
+	data, err := os.ReadFile(statPath)
+	if err != nil {
+		t.Skipf("cpu.stat not readable: %v", err)
+	}
+	usage, throttled := parseCPUStat(data)
+	t.Logf("cpu.stat after ~3s spin: usage_usec=%d nr_throttled=%d\n%s", usage, throttled, data)
+	if throttled == 0 && usage > 2_500_000 {
+		t.Errorf("cpu.max was set to 0.2 but nr_throttled=0 and usage_usec=%d (~full core); quota may not be enforced", usage)
+	}
+	if throttled == 0 {
+		t.Log("nr_throttled=0 after 3s; quota file is set. Throttle counters can lag on lightly loaded hosts.")
+	}
+}
+
+func TestMemoryLimitEnforcement(t *testing.T) {
+	requireLinuxRuntime(t)
+
+	script := "mount -t tmpfs -o size=256m tmpfs /tmp && dd if=/dev/zero of=/tmp/hog bs=1M count=200 && echo UNBOUNDED"
+	cmd := gockerCommand("run", "--network=none", "--memory-limit", "64M",
+		"/bin/busybox", "sh", "-c", script)
+	output, err := cmd.CombinedOutput()
+	out := string(output)
+	t.Logf("memory test output (err=%v):\n%s", err, out)
+
+	if strings.Contains(out, "Permission denied") || strings.Contains(out, "Operation not permitted") {
+		t.Skip("tmpfs mount not permitted inside the container; cannot prove memory.max")
+	}
+	ran := strings.Contains(out, "Executing command") || strings.Contains(out, "records in") ||
+		strings.Contains(out, "Killed") || strings.Contains(out, "UNBOUNDED")
+	if !ran {
+		if strings.Contains(out, "memory.max") || strings.Contains(out, "cgroup") {
+			t.Skipf("memory controller not usable: %v\n%s", err, out)
+		}
+		t.Fatalf("container did not reach the memory hog: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "UNBOUNDED") {
+		t.Fatal("200MB tmpfs write succeeded under memory.max=64M")
+	}
+	if err == nil && !strings.Contains(out, "Killed") && !strings.Contains(out, "Cannot allocate") {
+		t.Errorf("expected OOM/kill or allocate failure under 64M; got success:\n%s", out)
+	}
+}
+
+func TestNetworkNoneHasNoVeth(t *testing.T) {
+	requireLinuxRuntime(t)
+
+	cmd := gockerCommand("run", "-d", "--network=none", "/bin/busybox", "sleep", "10")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("start: %v\n%s", err, output)
+	}
+	id := parseStartedContainerID(output)
+	if id == "" {
+		t.Fatalf("no container ID in:\n%s", output)
+	}
+	defer stopAndRemove(id)
+
+	if err := waitForPath(stateFile(id), 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	ctr, err := state.Load(id)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if ctr.ContainerIP != "" || ctr.VethHost != "" {
+		t.Errorf("expected no veth/IP with --network=none; ip=%q veth=%q", ctr.ContainerIP, ctr.VethHost)
+	}
+}
+
+func TestVolumeBindMount(t *testing.T) {
+	requireLinuxRuntime(t)
+
+	host := t.TempDir()
+	if err := os.WriteFile(filepath.Join(host, "hello.txt"), []byte("from-host"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	cmd := gockerCommand("run", "--network=none", "-v", host+":/data",
+		"/bin/busybox", "cat", "/data/hello.txt")
+	output, err := cmd.CombinedOutput()
+	out := string(output)
+	if err != nil {
+		t.Fatalf("run -v: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "from-host") {
+		t.Errorf("bind mount did not show host file:\n%s", out)
+	}
+}
+
+func TestQuietSuppressesTeachingLogs(t *testing.T) {
+	requireLinuxRuntime(t)
+
+	cmd := gockerCommand("run", "-q", "--network=none", "/bin/busybox", "echo", "hello-quiet")
+	output, err := cmd.CombinedOutput()
+	out := string(output)
+	if err != nil {
+		t.Fatalf("run -q: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "hello-quiet") {
+		t.Errorf("missing command output:\n%s", out)
+	}
+	if strings.Contains(out, "Creating isolated namespaces") {
+		t.Errorf("--quiet still printed teaching logs:\n%s", out)
+	}
+}
+
+func TestNameStopRm(t *testing.T) {
+	requireLinuxRuntime(t)
+
+	name := fmt.Sprintf("gockername%d", time.Now().UnixNano())
+	cmd := gockerCommand("run", "-d", "--network=none", "--name", name, "/bin/busybox", "sleep", "20")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("start: %v\n%s", err, output)
+	}
+	id := parseStartedContainerID(output)
+	if id == "" {
+		t.Fatalf("no container ID in:\n%s", output)
+	}
+	defer stopAndRemove(id)
+
+	if err := waitForPath(stateFile(id), 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := gockerCommand("stop", name).CombinedOutput(); err != nil {
+		t.Fatalf("stop by name: %v\n%s", err, out)
+	}
+	ctr, err := state.Load(name)
+	if err != nil {
+		t.Fatalf("load by name: %v", err)
+	}
+	if ctr.Status != "stopped" || ctr.Name != name {
+		t.Errorf("status=%q name=%q", ctr.Status, ctr.Name)
+	}
+	if out, err := gockerCommand("rm", name).CombinedOutput(); err != nil {
+		t.Fatalf("rm by name: %v\n%s", err, out)
+	}
+}
+
+func TestTeachingCapsDroppedInContainer(t *testing.T) {
+	requireLinuxRuntime(t)
+
+	cmd := gockerCommand("run", "--network=none", "/bin/busybox", "cat", "/proc/self/status")
+	output, err := cmd.CombinedOutput()
+	out := string(output)
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, out)
+	}
+
+	dropped := 0
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.HasPrefix(line, "CapBnd:") {
+			continue
+		}
+		hex := strings.TrimSpace(strings.TrimPrefix(line, "CapBnd:"))
+		var v uint64
+		fmt.Sscanf(hex, "%x", &v)
+		for _, c := range ns.TeachingDropCaps {
+			if v&(1<<uint(c)) != 0 {
+				t.Errorf("container CapBnd still has teaching cap %d", c)
+			} else {
+				dropped++
+			}
+		}
+	}
+	if dropped == 0 {
+		t.Errorf("CapBnd not found in container status (teaching cap drop may have been skipped):\n%s", out)
 	}
 }

@@ -59,7 +59,7 @@ run: build $(ROOTFS_DIR)
 # Unprivileged unit tests (user-namespace clone flags; no sudo).
 test-unprivileged: build
 	@echo "Running namespace unit tests without sudo..."
-	@GOCKER_ALLOW_UNPRIVILEGED=1 go test -v ./internal/ns ./internal/cgroup ./internal/net ./internal/overlay -run 'TestNamespaceConfig|TestCloneUserNamespace|TestParseCPULimit|TestParseMemoryLimit|TestFindFreeIP|TestMountPoint'
+	@GOCKER_ALLOW_UNPRIVILEGED=1 go test -v ./internal/ns ./internal/cgroup ./internal/net ./internal/overlay -run 'TestNamespaceConfig|TestCloneUserNamespace|TestParseCPULimit|TestParseMemoryLimit|TestFindFreeIP|TestMountPoint|TestDropTeachingCaps'
 
 # Startup benchmark vs docker (Linux + sudo). Writes docs/BENCHMARKS.md.
 # Invoke via bash so a missing execute bit (git 100644, Windows checkouts) cannot fail CI.

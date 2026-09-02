@@ -37,7 +37,9 @@ func Setup(cgroupPath string, cpuLimit, memoryLimit string) error {
 	if err := os.WriteFile(pidsMaxPath, []byte("20"), 0644); err != nil {
 		return fmt.Errorf("failed to set pids.max: %v", err)
 	}
-	fmt.Fprintln(os.Stderr, "  - Process limit set to 20")
+	if os.Getenv("GOCKER_QUIET") != "1" {
+		fmt.Fprintln(os.Stderr, "  - Process limit set to 20")
+	}
 
 	if cpuLimit != "" && cpuLimit != "max" {
 		cpuMax, err := ParseCPULimit(cpuLimit)
@@ -49,7 +51,9 @@ func Setup(cgroupPath string, cpuLimit, memoryLimit string) error {
 		if err := os.WriteFile(cpuMaxPath, []byte(cpuMax), 0644); err != nil {
 			return fmt.Errorf("failed to set cpu.max: %v", err)
 		}
-		fmt.Fprintf(os.Stderr, "  - CPU limit: %s\n", cpuLimit)
+		if os.Getenv("GOCKER_QUIET") != "1" {
+			fmt.Fprintf(os.Stderr, "  - CPU limit: %s\n", cpuLimit)
+		}
 	}
 
 	if memoryLimit != "" && memoryLimit != "max" {
@@ -62,7 +66,9 @@ func Setup(cgroupPath string, cpuLimit, memoryLimit string) error {
 		if err := os.WriteFile(memoryMaxPath, []byte(memoryMax), 0644); err != nil {
 			return fmt.Errorf("failed to set memory.max: %v", err)
 		}
-		fmt.Fprintf(os.Stderr, "  - Memory limit: %s\n", memoryLimit)
+		if os.Getenv("GOCKER_QUIET") != "1" {
+			fmt.Fprintf(os.Stderr, "  - Memory limit: %s\n", memoryLimit)
+		}
 	}
 
 	return nil

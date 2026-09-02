@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 
 	"gocker/internal/cgroup"
 	gockernet "gocker/internal/net"
@@ -20,54 +21,148 @@ import (
 	"gocker/internal/state"
 )
 
-func run() {
-	var cpuLimit, memoryLimit, rootfsPath string
-	var volumes []string
-	var detached bool
-	args := os.Args[2:]
-	var remainingArgs []string
+type runOptions struct {
+	cpuLimit    string
+	memoryLimit string
+	rootfsPath  string
+	network     string
+	name        string
+	volumes     []string
+	detached    bool
+	quiet       bool
+	command     []string
+}
+
+func parseRunFlags(args []string) (runOptions, error) {
+	var opt runOptions
+	opt.network = "bridge"
+	var rest []string
 
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
-		if arg == "--cpu-limit" {
-			if i+1 < len(args) {
-				cpuLimit = args[i+1]
-				i++
+		needVal := func(flag string) (string, error) {
+			if i+1 >= len(args) {
+				return "", fmt.Errorf("%s requires a value", flag)
 			}
-		} else if arg == "--memory-limit" {
-			if i+1 < len(args) {
-				memoryLimit = args[i+1]
-				i++
+			i++
+			return args[i], nil
+		}
+		switch {
+		case arg == "--cpu-limit":
+			v, err := needVal(arg)
+			if err != nil {
+				return opt, err
 			}
-		} else if arg == "--volume" || arg == "-v" {
-			if i+1 < len(args) {
-				volumes = append(volumes, args[i+1])
-				i++
+			opt.cpuLimit = v
+		case arg == "--memory-limit":
+			v, err := needVal(arg)
+			if err != nil {
+				return opt, err
 			}
-		} else if arg == "--detach" || arg == "-d" {
-			detached = true
-		} else if arg == "--rootless" {
-			// Consumed here so it is not treated as the container command.
+			opt.memoryLimit = v
+		case arg == "--volume" || arg == "-v":
+			v, err := needVal(arg)
+			if err != nil {
+				return opt, err
+			}
+			opt.volumes = append(opt.volumes, v)
+		case arg == "--detach" || arg == "-d":
+			opt.detached = true
+		case arg == "--quiet" || arg == "-q":
+			opt.quiet = true
+		case arg == "--rootless":
+			// Consumed so it is not treated as the container command.
 			// Root check is handled in main() via allowUnprivileged().
-		} else if arg == "--rootfs" {
-			if i+1 < len(args) {
-				rootfsPath = args[i+1]
-				i++
+		case arg == "--rootfs":
+			v, err := needVal(arg)
+			if err != nil {
+				return opt, err
 			}
-		} else {
-			remainingArgs = append(remainingArgs, arg)
+			opt.rootfsPath = v
+		case arg == "--name":
+			v, err := needVal(arg)
+			if err != nil {
+				return opt, err
+			}
+			opt.name = v
+		case arg == "--network":
+			v, err := needVal(arg)
+			if err != nil {
+				return opt, err
+			}
+			opt.network = v
+		case strings.HasPrefix(arg, "--network="):
+			opt.network = strings.TrimPrefix(arg, "--network=")
+		case arg == "--":
+			rest = append(rest, args[i+1:]...)
+			i = len(args)
+		default:
+			rest = append(rest, arg)
 		}
 	}
 
-	if len(remainingArgs) == 0 {
+	opt.command = rest
+	if opt.network == "" {
+		opt.network = "bridge"
+	}
+	if opt.network != "bridge" && opt.network != "none" {
+		return opt, fmt.Errorf("unknown --network mode %q (supported: bridge, none)", opt.network)
+	}
+	if opt.name != "" && !validContainerName(opt.name) {
+		return opt, fmt.Errorf("invalid container name %q", opt.name)
+	}
+	return opt, nil
+}
+
+func validContainerName(name string) bool {
+	if name == "" || len(name) > 64 {
+		return false
+	}
+	for i, r := range name {
+		ok := unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '-' || r == '.'
+		if !ok {
+			return false
+		}
+		if i == 0 && (r == '.' || r == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+func logv(quiet bool, format string, args ...interface{}) {
+	if quiet {
+		return
+	}
+	fmt.Fprintf(os.Stderr, format, args...)
+}
+
+func run() {
+	opt, err := parseRunFlags(os.Args[2:])
+	must(err)
+
+	if len(opt.command) == 0 {
 		fmt.Println("Error: command required")
 		fmt.Println("Usage: gocker run [options] <command> [args...]")
 		os.Exit(1)
 	}
 
-	resolvedRootfs, err := overlay.ResolveRootfs(rootfsPath)
+	if opt.quiet {
+		os.Setenv("GOCKER_QUIET", "1")
+	}
+	os.Setenv("GOCKER_NETWORK", opt.network)
+
+	resolvedRootfs, err := overlay.ResolveRootfs(opt.rootfsPath)
 	if err != nil {
 		must(err)
+	}
+
+	if opt.name != "" {
+		taken, err := state.NameTaken(opt.name)
+		must(err)
+		if taken {
+			must(fmt.Errorf("container name already in use: %s", opt.name))
+		}
 	}
 
 	containerID := generateContainerID()
@@ -82,8 +177,8 @@ func run() {
 		must(fmt.Errorf("failed to create cgroup: %v", err))
 	}
 
-	fmt.Fprintln(os.Stderr, "Setting up cgroups v2 for resource limits...")
-	if err := cgroup.Setup(cgroupPath, cpuLimit, memoryLimit); err != nil {
+	logv(opt.quiet, "Setting up cgroups v2 for resource limits...\n")
+	if err := cgroup.Setup(cgroupPath, opt.cpuLimit, opt.memoryLimit); err != nil {
 		cgroup.Cleanup(cgroupPath)
 		overlay.CleanupDirs(containerID)
 		must(err)
@@ -93,8 +188,8 @@ func run() {
 	os.Setenv("GOCKER_ROOTFS", resolvedRootfs)
 	os.Setenv("GOCKER_OVERLAY_DIR", overlay.BaseDir(containerID))
 	os.Setenv("GOCKER_CGROUP_PATH", cgroupPath)
-	if len(volumes) > 0 {
-		os.Setenv("GOCKER_VOLUMES", strings.Join(volumes, "|"))
+	if len(opt.volumes) > 0 {
+		os.Setenv("GOCKER_VOLUMES", strings.Join(opt.volumes, "|"))
 	}
 
 	logFile := filepath.Join(state.Dir, "logs", containerID+".log")
@@ -112,28 +207,28 @@ func run() {
 	}
 	defer logWriter.Close()
 
-	if !detached {
-		fmt.Fprintf(os.Stderr, "Running %v as PID %d\n", remainingArgs, os.Getpid())
+	if !opt.detached {
+		logv(opt.quiet, "Running %v as PID %d\n", opt.command, os.Getpid())
 	}
-	fmt.Fprintln(os.Stderr, "Creating isolated namespaces...")
-	fmt.Fprintln(os.Stderr, "  - UTS namespace (hostname isolation)")
-	fmt.Fprintln(os.Stderr, "  - PID namespace (process ID isolation)")
-	fmt.Fprintln(os.Stderr, "  - Mount namespace (filesystem isolation)")
-	fmt.Fprintln(os.Stderr, "  - Network namespace (network isolation)")
+	logv(opt.quiet, "Creating isolated namespaces...\n")
+	logv(opt.quiet, "  - UTS namespace (hostname isolation)\n")
+	logv(opt.quiet, "  - PID namespace (process ID isolation)\n")
+	logv(opt.quiet, "  - Mount namespace (filesystem isolation)\n")
+	logv(opt.quiet, "  - Network namespace (network isolation)\n")
 
 	includeUser := os.Geteuid() != 0 || allowUnprivileged()
 	if includeUser {
-		fmt.Fprintln(os.Stderr, "  - User namespace (optional; uid/gid mapped)")
+		logv(opt.quiet, "  - User namespace (optional; uid/gid mapped)\n")
 	}
 
-	cmd := exec.Command("/proc/self/exe", append([]string{"child"}, remainingArgs...)...)
+	cmd := exec.Command("/proc/self/exe", append([]string{"child"}, opt.command...)...)
 
 	// Set up I/O. Detached children must inherit the log *os.File only.
 	// Wiring os.Stdout/os.Stderr (or a MultiWriter) makes exec.Cmd use a pipe
 	// plus a copy goroutine; Wait() then blocks until the child exits, and
 	// closing that pipe when the parent exits can kill the child (the reaper
 	// then removes the cgroup the integration tests look for).
-	if detached {
+	if opt.detached {
 		cmd.Stdin = nil
 		cmd.Stdout = logWriter
 		cmd.Stderr = logWriter
@@ -145,9 +240,9 @@ func run() {
 
 	cmd.SysProcAttr = ns.SysProcAttr(includeUser)
 	if includeUser {
-		fmt.Fprintf(os.Stderr, "  - User namespace: mapping container UID 0 -> host UID %d\n", os.Geteuid())
+		logv(opt.quiet, "  - User namespace: mapping container UID 0 -> host UID %d\n", os.Geteuid())
 	} else {
-		fmt.Fprintln(os.Stderr, "  - Running as root (user namespace not enabled; 4 namespaces)")
+		logv(opt.quiet, "  - Running as root (user namespace not enabled; 4 namespaces)\n")
 	}
 
 	if err := cmd.Start(); err != nil {
@@ -159,48 +254,63 @@ func run() {
 	childPid := cmd.Process.Pid
 
 	if err := cgroup.Add(cgroupPath, childPid); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: Failed to add process to cgroup: %v\n", err)
+		logv(opt.quiet, "Warning: Failed to add process to cgroup: %v\n", err)
 	}
 
 	var parentOutput io.Writer
-	if detached {
-		parentOutput = io.MultiWriter(logWriter, os.Stderr)
+	if opt.detached {
+		if opt.quiet {
+			parentOutput = logWriter
+		} else {
+			parentOutput = io.MultiWriter(logWriter, os.Stderr)
+		}
 	} else {
 		parentOutput = logWriter
 	}
 
 	fmt.Fprintf(parentOutput, "  - Child PID: %d\n", childPid)
 
-	if err := gockernet.EnsureBridge(); err != nil {
-		fmt.Fprintf(parentOutput, "Warning: Failed to set up bridge: %v\n", err)
+	abort := func(vethHost string, cause error) {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+		gockernet.CleanupContainer(containerID, vethHost)
+		cgroup.Cleanup(cgroupPath)
+		overlay.CleanupDirs(containerID)
+		_ = os.Remove(filepath.Join(state.ContainersDir, containerID+".json"))
+		_ = os.Remove(logFile)
+		must(cause)
 	}
 
-	if !detached {
-		fmt.Fprintln(logWriter, "Setting up network namespace...")
+	var vethHost, vethPeer, containerIP string
+	if opt.network == "none" {
+		logv(opt.quiet, "Skipping host network (--network=none)\n")
 	} else {
-		fmt.Fprintln(os.Stderr, "Setting up network namespace...")
-	}
+		if err := gockernet.EnsureBridge(); err != nil {
+			abort("", fmt.Errorf("bridge/NAT setup failed: %v (use --network=none to skip)", err))
+		}
 
-	vethHost, vethPeer, containerIP, err := gockernet.SetupContainer(containerID, childPid, !detached)
-	if err != nil {
-		if detached {
-			fmt.Fprintf(os.Stderr, "Warning: Failed to set up network: %v\n", err)
-		} else {
-			fmt.Fprintf(logWriter, "Warning: Failed to set up network: %v\n", err)
+		logv(opt.quiet, "Setting up network namespace...\n")
+		var netErr error
+		vethHost, vethPeer, containerIP, netErr = gockernet.SetupContainer(containerID, childPid, opt.detached || opt.quiet)
+		if netErr != nil {
+			abort(vethHost, fmt.Errorf("network setup failed: %v (use --network=none to skip)", netErr))
 		}
 	}
 
 	ctr := &state.ContainerState{
 		ID:          containerID,
+		Name:        opt.name,
 		PID:         childPid,
 		Status:      "running",
 		CreatedAt:   time.Now(),
-		Command:     remainingArgs,
+		Command:     opt.command,
 		VethHost:    vethHost,
 		VethPeer:    vethPeer,
 		ContainerIP: containerIP,
 		LogFile:     logFile,
-		Detached:    detached,
+		Detached:    opt.detached,
 		CgroupPath:  cgroupPath,
 		RootfsPath:  resolvedRootfs,
 	}
@@ -208,9 +318,11 @@ func run() {
 		fmt.Fprintf(parentOutput, "Warning: Failed to save container state: %v\n", err)
 	}
 
-	if detached {
+	if opt.detached {
 		fmt.Printf("Container started with ID: %s\n", containerID)
-		fmt.Printf("Use 'gocker logs %s' to view logs\n", containerID)
+		if !opt.quiet {
+			fmt.Printf("Use 'gocker logs %s' to view logs\n", containerID)
+		}
 		if err := startDetachedReaper(containerID); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: Failed to start detached reaper: %v\n", err)
 		}
@@ -253,11 +365,12 @@ func run() {
 }
 
 func child() {
-	fmt.Fprintf(os.Stderr, "Running in child process with PID %d\n", os.Getpid())
+	quiet := os.Getenv("GOCKER_QUIET") == "1"
+	logv(quiet, "Running in child process with PID %d\n", os.Getpid())
 
 	containerUID := syscall.Getuid()
 	containerGID := syscall.Getgid()
-	fmt.Fprintf(os.Stderr, "Container UID: %d, GID: %d\n", containerUID, containerGID)
+	logv(quiet, "Container UID: %d, GID: %d\n", containerUID, containerGID)
 
 	rootfsPath := os.Getenv("GOCKER_ROOTFS")
 	if rootfsPath == "" {
@@ -268,40 +381,47 @@ func child() {
 		must(fmt.Errorf("GOCKER_OVERLAY_DIR not set"))
 	}
 
-	fmt.Fprintln(os.Stderr, "Configuring container network...")
+	logv(quiet, "Configuring container network...\n")
 	if err := gockernet.ConfigureInside(); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: Failed to configure container network: %v\n", err)
+		logv(quiet, "Warning: Failed to configure container network: %v\n", err)
 	}
 
 	if err := syscall.Mount("", "/", "", syscall.MS_REC|syscall.MS_PRIVATE, ""); err != nil {
-		fmt.Fprintf(os.Stderr, "  - Note: MS_PRIVATE on /: %v\n", err)
+		logv(quiet, "  - Note: MS_PRIVATE on /: %v\n", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "Mounting OverlayFS (lower=%s, dirs=%s)...\n", rootfsPath, overlayBase)
+	logv(quiet, "Mounting OverlayFS (lower=%s, dirs=%s)...\n", rootfsPath, overlayBase)
 	merged, err := overlay.Mount(rootfsPath, overlayBase)
 	must(err)
 
 	volumesStr := os.Getenv("GOCKER_VOLUMES")
 	if volumesStr != "" {
-		fmt.Fprintln(os.Stderr, "Mounting volumes...")
+		logv(quiet, "Mounting volumes...\n")
 		if err := overlay.MountVolumes(volumesStr, merged); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: Failed to mount volumes: %v\n", err)
 		}
 	}
 
-	fmt.Fprintln(os.Stderr, "Setting hostname to 'gocker-container'...")
+	logv(quiet, "Setting hostname to 'gocker-container'...\n")
 	must(syscall.Sethostname([]byte("gocker-container")))
 
 	if err := overlay.EnsureDevices(merged); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: Failed to set up jail device nodes: %v\n", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "Entering OverlayFS jail with pivot_root (%s)...\n", merged)
+	logv(quiet, "Entering OverlayFS jail with pivot_root (%s)...\n", merged)
 	must(overlay.Pivot(merged))
 
-	fmt.Fprintln(os.Stderr, "Mounting proc filesystem...")
+	logv(quiet, "Mounting proc filesystem...\n")
 	must(syscall.Mount("proc", "proc", "proc", 0, ""))
 	defer syscall.Unmount("proc", 0)
+
+	// Teaching-only: drop extra caps after the jail is up. Not a production
+	// profile (no seccomp). Volume/tmpfs mounts in the *command* still work
+	// because we keep CAP_SYS_ADMIN.
+	if err := ns.DropTeachingCaps(); err != nil {
+		logv(quiet, "Warning: teaching cap drop: %v\n", err)
+	}
 
 	command := "/bin/sh"
 	args := []string{}
@@ -314,7 +434,7 @@ func child() {
 
 	os.Setenv("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
 
-	fmt.Fprintf(os.Stderr, "Executing command: %s %v\n", command, args)
+	logv(quiet, "Executing command: %s %v\n", command, args)
 	cmd := exec.Command(command, args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout

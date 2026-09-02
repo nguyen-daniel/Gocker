@@ -52,3 +52,46 @@ func TestResolveID(t *testing.T) {
 		t.Errorf("Expected error for non-existent ID, got nil")
 	}
 }
+
+func TestResolveIDByName(t *testing.T) {
+	testID := "namedcontainer999888777"
+	testState := &ContainerState{
+		ID:        testID,
+		Name:      "demo-ctr",
+		PID:       1,
+		Status:    "exited",
+		CreatedAt: time.Now(),
+		Command:   []string{"/bin/sh"},
+	}
+
+	if err := EnsureDir(); err != nil {
+		t.Fatalf("Failed to ensure state dir: %v", err)
+	}
+	if err := Save(testState); err != nil {
+		t.Fatalf("Failed to save test state: %v", err)
+	}
+	defer os.Remove(filepath.Join(ContainersDir, testID+".json"))
+
+	resolved, err := ResolveID("demo-ctr")
+	if err != nil {
+		t.Fatalf("resolve by name: %v", err)
+	}
+	if resolved != testID {
+		t.Errorf("got %s, want %s", resolved, testID)
+	}
+
+	taken, err := NameTaken("demo-ctr")
+	if err != nil {
+		t.Fatalf("NameTaken: %v", err)
+	}
+	if !taken {
+		t.Error("expected NameTaken(\"demo-ctr\")")
+	}
+	taken, err = NameTaken("other-name")
+	if err != nil {
+		t.Fatalf("NameTaken: %v", err)
+	}
+	if taken {
+		t.Error("did not expect NameTaken(\"other-name\")")
+	}
+}
