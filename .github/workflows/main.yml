@@ -19,6 +19,9 @@ jobs:
       uses: actions/setup-go@v5
       with:
         go-version: '1.21'
+
+    - name: gofmt and go vet
+      run: make lint
     
     - name: Set up Docker
       # Docker is required for the setup target which uses docker export

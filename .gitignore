@@ -1,7 +1,7 @@
-# Gocker binary (built executable)
-gocker
-gocker.exe
-gocker.test
+# Gocker binary (built executable at repo root; do not ignore cmd/gocker/)
+/gocker
+/gocker.exe
+/gocker.test
 
 # Rootfs directory (can be regenerated with make setup)
 # This is large and doesn't need to be in version control

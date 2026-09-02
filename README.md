@@ -54,12 +54,16 @@ make bench             # startup vs docker (Linux); writes docs/startup_bench.js
 
 ## Project structure
 
-- `main.go` — namespaces, OverlayFS, cgroups, network, CLI
-- `main_test.go` — unit + integration tests
+- `cmd/gocker` — CLI (`run`, `ps`, `stop`, `rm`, `logs`) and integration tests
+- `internal/ns` — clone flags (UTS/PID/mount/net; optional user ns)
+- `internal/cgroup` — cgroups v2 CPU/memory/`pids.max`
+- `internal/net` — bridge, veth, NAT, IPAM
+- `internal/overlay` — OverlayFS, `pivot_root`, volume path jail
+- `internal/state` — JSON container state under `/var/lib/gocker`
 - `scripts/bench_startup.sh` — gocker vs `docker run --rm alpine true`
 - `docs/BENCHMARKS.md` — how to reproduce benches
 - `docs/demo_run.txt` — `echo hello` + hostname transcript
-- `.github/workflows/main.yml` — Ubuntu CI
+- `.github/workflows/main.yml` — Ubuntu CI (`gofmt`, `go vet`, tests)
 
 ## Prerequisites
 
