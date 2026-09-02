@@ -22,7 +22,7 @@ func EnsureBridge() error {
 		cmd := exec.Command("ip", "link", "set", BridgeName, "up")
 		cmd.Run()
 		if err := setupNATRules(); err != nil {
-			fmt.Fprintf(os.Stderr, "  - Warning: Failed to set up NAT: %v\n", err)
+			return fmt.Errorf("failed to set up NAT: %v", err)
 		}
 		return nil
 	}
@@ -50,7 +50,7 @@ func EnsureBridge() error {
 	}
 
 	if err := setupNATRules(); err != nil {
-		fmt.Fprintf(os.Stderr, "  - Warning: Failed to set up NAT: %v\n", err)
+		return fmt.Errorf("failed to set up NAT: %v", err)
 	}
 
 	fmt.Fprintln(os.Stderr, "  - Bridge gocker0 created and configured")

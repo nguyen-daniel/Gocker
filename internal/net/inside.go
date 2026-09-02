@@ -33,6 +33,11 @@ func ConfigureInside() error {
 	cmd := exec.Command(ipCmd, "link", "set", "lo", "up")
 	cmd.Run()
 
+	// Isolated net ns with loopback only. Skip the veth wait (up to 5s).
+	if os.Getenv("GOCKER_NETWORK") == "none" {
+		return nil
+	}
+
 	var foundVeth string
 	for i := 0; i < 50; i++ {
 		show := exec.Command(ipCmd, "link", "show", "type", "veth")

@@ -17,7 +17,7 @@ N=50 make bench
 | Topic | What is true | What is not claimed |
 |-------|----------------|---------------------|
 | Namespaces | Rootful default: UTS + PID + mount + net. User ns is optional (`--rootless`). | “5 namespaces” on the default path |
-| cgroups v2 | CPU 0.5–2, memory, `pids.max=20`. `TestPidsMaxEnforcement` on Linux | — |
+| cgroups v2 | CPU (`cpu.max`), memory (`memory.max`), `pids.max=20`. Linux tests: `TestPidsMaxEnforcement`, `TestCPULimitEnforcement`, `TestMemoryLimitEnforcement` | — |
 | Network | veth + NAT + IPAM `10.0.0.2`–`.254` | — |
 | Startup vs Docker | Run `make bench` and quote the JSON | No `<100ms` / `~200ms` figure in-repo |
 

@@ -21,6 +21,7 @@ const (
 // ContainerState represents the state of a container.
 type ContainerState struct {
 	ID          string    `json:"id"`
+	Name        string    `json:"name,omitempty"`
 	PID         int       `json:"pid"`
 	Status      string    `json:"status"` // "running", "stopped", "exited"
 	CreatedAt   time.Time `json:"created_at"`
@@ -84,12 +85,15 @@ func Load(containerID string) (*ContainerState, error) {
 	if err != nil {
 		return nil, err
 	}
+	return loadExact(fullID)
+}
 
+func loadExact(fullID string) (*ContainerState, error) {
 	stateFile := filepath.Join(ContainersDir, fullID+".json")
 
 	f, err := os.Open(stateFile)
 	if err != nil {
-		return nil, fmt.Errorf("container not found: %s", containerID)
+		return nil, fmt.Errorf("container not found: %s", fullID)
 	}
 	defer f.Close()
 
@@ -116,29 +120,76 @@ func ResolveID(partialID string) (string, error) {
 		return "", err
 	}
 
+	exact := filepath.Join(ContainersDir, partialID+".json")
+	if _, err := os.Stat(exact); err == nil {
+		return partialID, nil
+	}
+
 	files, err := os.ReadDir(ContainersDir)
 	if err != nil {
 		return "", fmt.Errorf("failed to read containers directory: %v", err)
 	}
 
-	var matches []string
+	var prefixMatches []string
+	var nameMatch string
 	for _, file := range files {
 		if !strings.HasSuffix(file.Name(), ".json") {
 			continue
 		}
 		fullID := strings.TrimSuffix(file.Name(), ".json")
 		if strings.HasPrefix(fullID, partialID) {
-			matches = append(matches, fullID)
+			prefixMatches = append(prefixMatches, fullID)
+		}
+		ctr, err := loadExact(fullID)
+		if err != nil {
+			continue
+		}
+		if ctr.Name != "" && ctr.Name == partialID {
+			if nameMatch != "" && nameMatch != fullID {
+				return "", fmt.Errorf("ambiguous container name: %s", partialID)
+			}
+			nameMatch = fullID
 		}
 	}
 
-	if len(matches) == 0 {
+	if nameMatch != "" {
+		return nameMatch, nil
+	}
+	if len(prefixMatches) == 0 {
 		return "", fmt.Errorf("container not found: %s", partialID)
 	}
-	if len(matches) > 1 {
+	if len(prefixMatches) > 1 {
 		return "", fmt.Errorf("ambiguous container ID: %s matches multiple containers", partialID)
 	}
-	return matches[0], nil
+	return prefixMatches[0], nil
+}
+
+// NameTaken reports whether any saved container already uses name.
+func NameTaken(name string) (bool, error) {
+	if name == "" {
+		return false, nil
+	}
+	if err := EnsureDir(); err != nil {
+		return false, err
+	}
+	files, err := os.ReadDir(ContainersDir)
+	if err != nil {
+		return false, fmt.Errorf("failed to read containers directory: %v", err)
+	}
+	for _, file := range files {
+		if !strings.HasSuffix(file.Name(), ".json") {
+			continue
+		}
+		fullID := strings.TrimSuffix(file.Name(), ".json")
+		ctr, err := loadExact(fullID)
+		if err != nil {
+			continue
+		}
+		if ctr.Name == name {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func UpdateStatus(containerID string, status string) error {
