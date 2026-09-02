@@ -1,4 +1,4 @@
-.PHONY: build test setup run clean bench test-unprivileged
+.PHONY: build test setup run clean bench test-unprivileged lint
 
 BINARY_NAME=gocker
 ROOTFS_DIR=rootfs
@@ -8,8 +8,20 @@ ALPINE_IMAGE=alpine:latest
 # This creates the gocker executable that will be used for container operations
 build:
 	@echo "Building $(BINARY_NAME)..."
-	@go build -o $(BINARY_NAME) .
+	@go build -o $(BINARY_NAME) ./cmd/gocker
 	@echo "Build complete: $(BINARY_NAME)"
+
+# Format and vet. Used by CI; no extra linters (keep the zero-dependency bar).
+lint:
+	@echo "Checking gofmt..."
+	@unformatted=$$(gofmt -l .); \
+	if [ -n "$$unformatted" ]; then \
+		echo "gofmt needed:"; \
+		echo "$$unformatted"; \
+		exit 1; \
+	fi
+	@echo "Running go vet..."
+	@go vet ./...
 
 # Setup downloads and extracts a mini-Alpine rootfs using docker export
 # This is the shared OverlayFS lower layer; each container gets its own upper/work
@@ -47,7 +59,7 @@ run: build $(ROOTFS_DIR)
 # Unprivileged unit tests (user-namespace clone flags; no sudo).
 test-unprivileged: build
 	@echo "Running namespace unit tests without sudo..."
-	@GOCKER_ALLOW_UNPRIVILEGED=1 go test -v -run 'TestNamespaceConfig|TestCloneUserNamespace|TestCPULimitParsing|TestMemoryLimitParsing|TestFindFreeIP'
+	@GOCKER_ALLOW_UNPRIVILEGED=1 go test -v ./internal/ns ./internal/cgroup ./internal/net ./internal/overlay -run 'TestNamespaceConfig|TestCloneUserNamespace|TestParseCPULimit|TestParseMemoryLimit|TestFindFreeIP|TestMountPoint'
 
 # Startup benchmark vs docker (Linux + sudo). Writes docs/BENCHMARKS.md.
 # Invoke via bash so a missing execute bit (git 100644, Windows checkouts) cannot fail CI.

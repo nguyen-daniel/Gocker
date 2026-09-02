@@ -7,7 +7,7 @@ Captured to match what CI already asserts:
   TestOverlayWriteIsolation  → writes stay in per-container OverlayFS upper
 
 Illustrative Linux capture (not live from this Windows machine). Text is the
-messages main.go / child() print on a successful rootful run: OverlayFS mount
+messages cmd/gocker / child() print on a successful rootful run: OverlayFS mount
 then pivot_root — not chroot. Placeholders (PIDs, veth names, paths) are
 not measured numbers.
 
