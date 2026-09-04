@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	"gocker/internal/state"
 )
 
 const (
@@ -173,6 +175,15 @@ func CleanupVeth(vethHost string) {
 func CleanupContainer(containerID, vethHost string) {
 	CleanupVeth(vethHost)
 	ReleaseIP(containerID)
+}
+
+// CleanupRuntime removes publish rules, the veth, and the IPAM lease.
+func CleanupRuntime(ctr *state.ContainerState) {
+	if ctr == nil {
+		return
+	}
+	RemovePublishRules(ctr.ContainerIP, ctr.PublishedPorts)
+	CleanupContainer(ctr.ID, ctr.VethHost)
 }
 
 func getDefaultInterface() (string, error) {

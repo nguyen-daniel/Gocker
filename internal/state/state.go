@@ -20,19 +20,26 @@ const (
 
 // ContainerState represents the state of a container.
 type ContainerState struct {
-	ID          string    `json:"id"`
-	Name        string    `json:"name,omitempty"`
-	PID         int       `json:"pid"`
-	Status      string    `json:"status"` // "running", "stopped", "exited"
-	CreatedAt   time.Time `json:"created_at"`
-	Command     []string  `json:"command"`
-	VethHost    string    `json:"veth_host,omitempty"`
-	VethPeer    string    `json:"veth_peer,omitempty"`
-	ContainerIP string    `json:"container_ip,omitempty"`
-	LogFile     string    `json:"log_file"`
-	Detached    bool      `json:"detached"`
-	CgroupPath  string    `json:"cgroup_path,omitempty"`
-	RootfsPath  string    `json:"rootfs_path,omitempty"`
+	ID             string    `json:"id"`
+	Name           string    `json:"name,omitempty"`
+	PID            int       `json:"pid"`
+	Status         string    `json:"status"` // "running", "stopped", "exited"
+	CreatedAt      time.Time `json:"created_at"`
+	Command        []string  `json:"command"`
+	VethHost       string    `json:"veth_host,omitempty"`
+	VethPeer       string    `json:"veth_peer,omitempty"`
+	ContainerIP    string    `json:"container_ip,omitempty"`
+	LogFile        string    `json:"log_file"`
+	Detached       bool      `json:"detached"`
+	CgroupPath     string    `json:"cgroup_path,omitempty"`
+	RootfsPath     string    `json:"rootfs_path,omitempty"`
+	PublishedPorts []PortMap `json:"published_ports,omitempty"`
+}
+
+// PortMap is a TCP host:container publish mapping stored for iptables teardown.
+type PortMap struct {
+	Host      int `json:"host"`
+	Container int `json:"container"`
 }
 
 func LockFile(f *os.File) error {

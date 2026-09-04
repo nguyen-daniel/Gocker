@@ -65,11 +65,11 @@ func runHelpRequested(args []string) bool {
 			return true
 		}
 		switch arg {
-		case "--cpu-limit", "--memory-limit", "--volume", "-v", "--rootfs", "--name", "--network":
+		case "--cpu-limit", "--memory-limit", "--volume", "-v", "--rootfs", "--name", "--network", "--publish", "-p":
 			i++
 		case "--detach", "-d", "--quiet", "-q", "--rootless", "--teach":
 		default:
-			if strings.HasPrefix(arg, "--network=") {
+			if strings.HasPrefix(arg, "--network=") || strings.HasPrefix(arg, "--publish=") {
 				continue
 			}
 			if strings.HasPrefix(arg, "-") {
@@ -143,6 +143,7 @@ const runUsage = `Usage: gocker run [options] <command> [args...]
   --cpu-limit <n>          CPU limit (e.g. '1', '0.5', 'max')
   --memory-limit <size>    Memory limit (e.g. '512M', '1G', 'max')
   --volume, -v <host:ctr>  Bind-mount a host path into the container
+  --publish, -p <h:c>      Publish TCP host:container (repeatable; no UDP)
   --detach, -d             Run container in background
   --name <name>            Name for stop/rm/logs/exec/ps (optional)
   --quiet, -q              Hide teaching logs (default)

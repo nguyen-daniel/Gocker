@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -916,6 +917,9 @@ func TestHelpExitsZeroWithoutRoot(t *testing.T) {
 	if !strings.Contains(string(out), "--teach") {
 		t.Errorf("run --help should mention --teach:\n%s", out)
 	}
+	if !strings.Contains(string(out), "--publish") && !strings.Contains(string(out), "-p") {
+		t.Errorf("run --help should mention -p / --publish:\n%s", out)
+	}
 }
 
 func TestNameStopRm(t *testing.T) {
@@ -1032,6 +1036,20 @@ func TestExecEchoAndHostname(t *testing.T) {
 	}
 }
 
+func TestResolvConfInJail(t *testing.T) {
+	requireLinuxRuntime(t)
+
+	cmd := gockerCommand("run", "--network=none", "/bin/busybox", "cat", "/etc/resolv.conf")
+	output, err := cmd.CombinedOutput()
+	out := string(output)
+	if err != nil {
+		t.Fatalf("run cat resolv.conf: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "can't open") || strings.Contains(out, "No such file") {
+		t.Errorf("resolv.conf missing in jail:\n%s", out)
+	}
+}
+
 func TestTeachingSeccompInContainer(t *testing.T) {
 	requireLinuxRuntime(t)
 
@@ -1063,5 +1081,52 @@ func TestTeachingSeccompInContainer(t *testing.T) {
 	if !strings.Contains(denyStr, "not permitted") && !strings.Contains(denyStr, "Permission denied") &&
 		!strings.Contains(denyStr, "denied") {
 		t.Logf("unshare failed (%v) without a clear EPERM string (still denied):\n%s", denyErr, denyStr)
+	}
+}
+
+func TestPortPublishLocalhost(t *testing.T) {
+	requireLinuxRuntime(t)
+
+	hostPort := 18080 + int(time.Now().UnixNano()%1000)
+	cmd := gockerCommand("run", "-d", "-p", fmt.Sprintf("%d:8080", hostPort),
+		"/bin/busybox", "sh", "-c",
+		"echo publish-ok > /tmp/index.html; /bin/busybox httpd -f -p 8080 -h /tmp")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("start: %v\n%s", err, output)
+	}
+	id := parseStartedContainerID(output)
+	if id == "" {
+		t.Fatalf("no container ID in:\n%s", output)
+	}
+	defer stopAndRemove(id)
+
+	if err := waitForPath(stateFile(id), 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	ctr, err := state.Load(id)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(ctr.PublishedPorts) != 1 || ctr.PublishedPorts[0].Host != hostPort {
+		t.Errorf("PublishedPorts=%+v", ctr.PublishedPorts)
+	}
+
+	url := fmt.Sprintf("http://127.0.0.1:%d/index.html", hostPort)
+	ok := waitUntil(8*time.Second, func() bool {
+		resp, err := http.Get(url)
+		if err != nil {
+			return false
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		return strings.Contains(string(body), "publish-ok")
+	})
+	if !ok {
+		t.Errorf("localhost:%d did not serve published httpd (DNAT/route_localnet?)", hostPort)
+	}
+
+	if out, err := gockerCommand("rm", "-f", id).CombinedOutput(); err != nil {
+		t.Fatalf("rm -f: %v\n%s", err, out)
 	}
 }

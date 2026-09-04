@@ -33,6 +33,45 @@ func TestParseRunFlags(t *testing.T) {
 	}
 }
 
+func TestParseRunFlagsPublish(t *testing.T) {
+	opt, err := parseRunFlags([]string{"-p", "8080:80", "--publish", "9090:90", "/bin/true"})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(opt.ports) != 2 || opt.ports[0].Host != 8080 || opt.ports[1].Container != 90 {
+		t.Errorf("ports: %+v", opt.ports)
+	}
+
+	_, err = parseRunFlags([]string{"--network=none", "-p", "8080:80", "/bin/true"})
+	if err == nil {
+		t.Fatal("expected error for -p with --network=none")
+	}
+	if !strings.Contains(err.Error(), "network=none") {
+		t.Errorf("error: %v", err)
+	}
+
+	_, err = parseRunFlags([]string{"-p", "8080:80/udp", "/bin/true"})
+	if err == nil {
+		t.Fatal("expected error for UDP publish")
+	}
+}
+
+func TestParseExecArgs(t *testing.T) {
+	id, cmd, err := parseExecArgs([]string{"web", "/bin/busybox", "echo", "hi"})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if id != "web" || strings.Join(cmd, " ") != "/bin/busybox echo hi" {
+		t.Errorf("id=%q cmd=%v", id, cmd)
+	}
+	if _, _, err := parseExecArgs([]string{"web"}); err == nil {
+		t.Fatal("expected command required")
+	}
+	if _, _, err := parseExecArgs([]string{"--foo", "web", "true"}); err == nil {
+		t.Fatal("expected unknown flag")
+	}
+}
+
 func TestParseRunFlagsDefaultQuietAndTeach(t *testing.T) {
 	opt, err := parseRunFlags([]string{"/bin/true"})
 	if err != nil {
@@ -99,21 +138,5 @@ func TestParseIDAndBoolFlag(t *testing.T) {
 	_, _, err = parseIDAndBoolFlag([]string{"--help"}, "-f", "--force")
 	if err == nil {
 		t.Fatal("expected unknown flag for --help at this layer")
-	}
-}
-
-func TestParseExecArgs(t *testing.T) {
-	id, cmd, err := parseExecArgs([]string{"web", "/bin/busybox", "echo", "hi"})
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if id != "web" || strings.Join(cmd, " ") != "/bin/busybox echo hi" {
-		t.Errorf("id=%q cmd=%v", id, cmd)
-	}
-	if _, _, err := parseExecArgs([]string{"web"}); err == nil {
-		t.Fatal("expected command required")
-	}
-	if _, _, err := parseExecArgs([]string{"--foo", "web", "true"}); err == nil {
-		t.Fatal("expected unknown flag")
 	}
 }
