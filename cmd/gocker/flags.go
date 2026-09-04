@@ -146,3 +146,17 @@ func parseIDAndBoolFlag(args []string, short, long string) (id string, flag bool
 	}
 	return id, flag, nil
 }
+
+func parseExecArgs(args []string) (id string, command []string, err error) {
+	if len(args) == 0 {
+		return "", nil, fmt.Errorf("container ID required")
+	}
+	if strings.HasPrefix(args[0], "-") {
+		return "", nil, fmt.Errorf("unknown flag: %s", args[0])
+	}
+	id = args[0]
+	if len(args) < 2 {
+		return "", nil, fmt.Errorf("command required")
+	}
+	return id, args[1:], nil
+}

@@ -19,6 +19,7 @@ func TestNamespaceConfig(t *testing.T) {
 		{"NEWPID", syscall.CLONE_NEWPID},
 		{"NEWNS", syscall.CLONE_NEWNS},
 		{"NEWNET", syscall.CLONE_NEWNET},
+		{"NEWIPC", syscall.CLONE_NEWIPC},
 	} {
 		if !HasCloneFlag(rootful.Cloneflags, f.bit) {
 			t.Errorf("rootful missing %s", f.name)
@@ -38,7 +39,7 @@ func TestNamespaceConfig(t *testing.T) {
 	if rootless.UidMappings[0].HostID != os.Geteuid() {
 		t.Errorf("uid map HostID=%d, want euid %d", rootless.UidMappings[0].HostID, os.Geteuid())
 	}
-	t.Logf("euid=%d: 4-ns rootful; optional user ns maps 0 -> %d", os.Geteuid(), rootless.UidMappings[0].HostID)
+	t.Logf("euid=%d: 5-ns rootful; optional user ns maps 0 -> %d", os.Geteuid(), rootless.UidMappings[0].HostID)
 }
 
 func TestCloneUserNamespace(t *testing.T) {

@@ -101,3 +101,19 @@ func TestParseIDAndBoolFlag(t *testing.T) {
 		t.Fatal("expected unknown flag for --help at this layer")
 	}
 }
+
+func TestParseExecArgs(t *testing.T) {
+	id, cmd, err := parseExecArgs([]string{"web", "/bin/busybox", "echo", "hi"})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if id != "web" || strings.Join(cmd, " ") != "/bin/busybox echo hi" {
+		t.Errorf("id=%q cmd=%v", id, cmd)
+	}
+	if _, _, err := parseExecArgs([]string{"web"}); err == nil {
+		t.Fatal("expected command required")
+	}
+	if _, _, err := parseExecArgs([]string{"--foo", "web", "true"}); err == nil {
+		t.Fatal("expected unknown flag")
+	}
+}

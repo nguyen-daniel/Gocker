@@ -70,6 +70,14 @@ func main() {
 			os.Exit(1)
 		}
 		showLogs(id, follow)
+	case "exec":
+		id, command, err := parseExecArgs(os.Args[2:])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			fmt.Print(execUsage)
+			os.Exit(1)
+		}
+		execContainer(id, command)
 	default:
 		fmt.Printf("Unknown command: %s\n", os.Args[1])
 		printUsage()

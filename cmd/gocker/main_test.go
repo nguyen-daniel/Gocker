@@ -5,6 +5,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -889,6 +890,7 @@ func TestHelpExitsZeroWithoutRoot(t *testing.T) {
 		{"stop", "--help"},
 		{"rm", "--help"},
 		{"logs", "--help"},
+		{"exec", "--help"},
 	} {
 		cmd := exec.Command(bin, args...)
 		out, err := cmd.CombinedOutput()
@@ -977,5 +979,89 @@ func TestTeachingCapsDroppedInContainer(t *testing.T) {
 	}
 	if dropped == 0 {
 		t.Errorf("CapBnd not found in container status (teaching cap drop may have been skipped):\n%s", out)
+	}
+}
+
+func TestExecEchoAndHostname(t *testing.T) {
+	requireLinuxRuntime(t)
+
+	cmd := gockerCommand("run", "-d", "--network=none", "--name",
+		fmt.Sprintf("exectest%d", time.Now().UnixNano()%100000),
+		"/bin/busybox", "sleep", "30")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("start: %v\n%s", err, output)
+	}
+	id := parseStartedContainerID(output)
+	if id == "" {
+		t.Fatalf("no container ID in:\n%s", output)
+	}
+	defer stopAndRemove(id)
+
+	if err := waitForPath(stateFile(id), 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := gockerCommand("exec", id, "/bin/busybox", "echo", "from-exec").CombinedOutput()
+	got := string(out)
+	if err != nil {
+		t.Fatalf("exec echo: %v\n%s", err, got)
+	}
+	if !strings.Contains(got, "from-exec") {
+		t.Errorf("exec echo missing output:\n%s", got)
+	}
+
+	out, err = gockerCommand("exec", id, "/bin/hostname").CombinedOutput()
+	got = string(out)
+	if err != nil {
+		t.Fatalf("exec hostname: %v\n%s", err, got)
+	}
+	if strings.TrimSpace(got) != "gocker-container" {
+		t.Errorf("exec hostname=%q, want gocker-container", strings.TrimSpace(got))
+	}
+
+	if out, err := gockerCommand("stop", id).CombinedOutput(); err != nil {
+		t.Fatalf("stop: %v\n%s", err, out)
+	}
+	out, err = gockerCommand("exec", id, "/bin/busybox", "true").CombinedOutput()
+	if err == nil {
+		t.Fatal("exec of stopped container should fail")
+	}
+	if !strings.Contains(string(out), "not running") {
+		t.Errorf("expected not-running error, got:\n%s", out)
+	}
+}
+
+func TestTeachingSeccompInContainer(t *testing.T) {
+	requireLinuxRuntime(t)
+
+	cmd := gockerCommand("run", "--network=none", "/bin/busybox", "cat", "/proc/self/status")
+	output, err := cmd.CombinedOutput()
+	out := string(output)
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "NoNewPrivs:\t1") && !strings.Contains(out, "NoNewPrivs: 1") {
+		t.Errorf("expected NoNewPrivs: 1:\n%s", out)
+	}
+	seccomp := ""
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "Seccomp:") {
+			seccomp = strings.TrimSpace(strings.TrimPrefix(line, "Seccomp:"))
+		}
+	}
+	if seccomp != "2" {
+		t.Errorf("Seccomp=%q, want 2 (filter mode):\n%s", seccomp, out)
+	}
+
+	deny := gockerCommand("run", "--network=none", "/bin/busybox", "unshare", "-m", "/bin/true")
+	denyOut, denyErr := deny.CombinedOutput()
+	denyStr := string(denyOut)
+	if denyErr == nil {
+		t.Fatalf("expected unshare to fail under teaching seccomp:\n%s", denyStr)
+	}
+	if !strings.Contains(denyStr, "not permitted") && !strings.Contains(denyStr, "Permission denied") &&
+		!strings.Contains(denyStr, "denied") {
+		t.Logf("unshare failed (%v) without a clear EPERM string (still denied):\n%s", denyErr, denyStr)
 	}
 }

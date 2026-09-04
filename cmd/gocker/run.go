@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -124,6 +125,7 @@ func run() {
 	logv(opt.quiet, "  - PID namespace (process ID isolation)\n")
 	logv(opt.quiet, "  - Mount namespace (filesystem isolation)\n")
 	logv(opt.quiet, "  - Network namespace (network isolation)\n")
+	logv(opt.quiet, "  - IPC namespace (SysV/POSIX IPC isolation)\n")
 
 	includeUser := os.Geteuid() != 0 || allowUnprivileged()
 	if includeUser {
@@ -181,7 +183,7 @@ func run() {
 	if includeUser {
 		logv(opt.quiet, "  - User namespace: mapping container UID 0 -> host UID %d\n", os.Geteuid())
 	} else {
-		logv(opt.quiet, "  - Running as root (user namespace not enabled; 4 namespaces)\n")
+		logv(opt.quiet, "  - Running as root (user namespace not enabled; 5 namespaces)\n")
 	}
 
 	if err := cmd.Start(); err != nil {
@@ -362,11 +364,16 @@ func child() {
 	must(syscall.Mount("proc", "proc", "proc", 0, ""))
 	defer syscall.Unmount("proc", 0)
 
-	// Teaching-only: drop extra caps after the jail is up. Not a production
-	// profile (no seccomp). Volume/tmpfs mounts in the *command* still work
-	// because we keep CAP_SYS_ADMIN.
+	// Teaching-only: drop extra caps and install a short seccomp filter
+	// after the jail is up. Not a production profile. CAP_SYS_ADMIN is kept.
+	// Lock the OS thread so the jail command inherits this thread's
+	// seccomp / no_new_privs (both are per-thread).
+	runtime.LockOSThread()
 	if err := ns.DropTeachingCaps(); err != nil {
 		logv(quiet, "Warning: teaching cap drop: %v\n", err)
+	}
+	if err := ns.InstallTeachingSeccomp(); err != nil {
+		logv(quiet, "Warning: teaching seccomp: %v\n", err)
 	}
 
 	command := "/bin/sh"

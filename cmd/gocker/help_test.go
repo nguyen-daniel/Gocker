@@ -24,6 +24,13 @@ func TestHelpRequest(t *testing.T) {
 		{[]string{"stop", "-h"}, "stop", true},
 		{[]string{"rm", "--force", "--help"}, "rm", true},
 		{[]string{"logs", "-f", "--help"}, "logs", true},
+		{[]string{"exec", "--help"}, "exec", true},
+		{[]string{"exec", "-h"}, "exec", true},
+		{[]string{"help", "exec"}, "exec", true},
+		{[]string{"exec", "web", "--help"}, "", false},
+		{[]string{"exec", "web", "/bin/busybox", "echo", "hi"}, "", false},
+		{[]string{"run", "-p", "8080:80", "--help"}, "run", true},
+		{[]string{"run", "-p", "8080:80", "/bin/busybox", "--help"}, "", false},
 		{[]string{"run", "/bin/busybox", "echo", "hi"}, "", false},
 		{[]string{"stop", "abc123"}, "", false},
 	}
