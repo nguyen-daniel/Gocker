@@ -40,6 +40,14 @@ func printContainerID(containerID string, detached, quiet bool) {
 	fmt.Fprintf(os.Stderr, "id %s\n", sid)
 }
 
+func toStatePorts(ports []gockernet.PortMap) []state.PortMap {
+	out := make([]state.PortMap, len(ports))
+	for i, p := range ports {
+		out[i] = state.PortMap{Host: p.Host, Container: p.Container}
+	}
+	return out
+}
+
 func run() {
 	opt, err := parseRunFlags(os.Args[2:])
 	must(err)
@@ -220,6 +228,8 @@ func run() {
 	fmt.Fprintf(logWriter, "  - Child PID: %d\n", childPid)
 	logv(opt.quiet, "  - Child PID: %d\n", childPid)
 
+	published := toStatePorts(opt.ports)
+
 	abort := func(cause error) {
 		if netReadyW != nil {
 			netReadyW.Close()
@@ -229,6 +239,7 @@ func run() {
 			_ = cmd.Process.Kill()
 			_ = cmd.Wait()
 		}
+		gockernet.RemovePublishRules(containerIP, published)
 		gockernet.CleanupContainer(containerID, vethHost)
 		cgroup.Cleanup(cgroupPath)
 		overlay.CleanupDirs(containerID)
@@ -249,20 +260,27 @@ func run() {
 		netReadyW = nil
 	}
 
+	if len(published) > 0 {
+		if err := gockernet.AddPublishRules(containerIP, published); err != nil {
+			abort(fmt.Errorf("port publish failed: %v", err))
+		}
+	}
+
 	ctr := &state.ContainerState{
-		ID:          containerID,
-		Name:        opt.name,
-		PID:         childPid,
-		Status:      "running",
-		CreatedAt:   time.Now(),
-		Command:     opt.command,
-		VethHost:    vethHost,
-		VethPeer:    vethPeer,
-		ContainerIP: containerIP,
-		LogFile:     logFile,
-		Detached:    opt.detached,
-		CgroupPath:  cgroupPath,
-		RootfsPath:  resolvedRootfs,
+		ID:             containerID,
+		Name:           opt.name,
+		PID:            childPid,
+		Status:         "running",
+		CreatedAt:      time.Now(),
+		Command:        opt.command,
+		VethHost:       vethHost,
+		VethPeer:       vethPeer,
+		ContainerIP:    containerIP,
+		LogFile:        logFile,
+		Detached:       opt.detached,
+		CgroupPath:     cgroupPath,
+		RootfsPath:     resolvedRootfs,
+		PublishedPorts: published,
 	}
 	if err := state.Save(ctr); err != nil {
 		fmt.Fprintf(parentOutput, "Warning: Failed to save container state: %v\n", err)
@@ -282,6 +300,7 @@ func run() {
 
 	cleanup := func() {
 		state.UpdateStatus(containerID, "exited")
+		gockernet.RemovePublishRules(containerIP, published)
 		gockernet.CleanupContainer(containerID, vethHost)
 		cgroup.Cleanup(cgroupPath)
 	}
@@ -341,6 +360,10 @@ func child() {
 	logv(quiet, "Mounting OverlayFS (lower=%s, dirs=%s)...\n", rootfsPath, overlayBase)
 	merged, err := overlay.Mount(rootfsPath, overlayBase)
 	must(err)
+
+	if err := overlay.CopyResolvConf(merged); err != nil {
+		logv(quiet, "Warning: resolv.conf: %v\n", err)
+	}
 
 	volumesStr := os.Getenv("GOCKER_VOLUMES")
 	if volumesStr != "" {
@@ -434,6 +457,6 @@ func reapContainer(containerID string) {
 	if ctr.Status == "running" {
 		_ = state.UpdateStatus(ctr.ID, "exited")
 	}
-	gockernet.CleanupContainer(ctr.ID, ctr.VethHost)
+	gockernet.CleanupRuntime(ctr)
 	cgroup.Cleanup(ctr.CgroupPath)
 }

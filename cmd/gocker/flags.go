@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"unicode"
+
+	gockernet "gocker/internal/net"
 )
 
 type runOptions struct {
@@ -13,6 +15,7 @@ type runOptions struct {
 	network     string
 	name        string
 	volumes     []string
+	ports       []gockernet.PortMap
 	detached    bool
 	quiet       bool
 	help        bool
@@ -55,6 +58,22 @@ func parseRunFlags(args []string) (runOptions, error) {
 				return opt, err
 			}
 			opt.volumes = append(opt.volumes, v)
+		case arg == "--publish" || arg == "-p":
+			v, err := needVal(arg)
+			if err != nil {
+				return opt, err
+			}
+			pm, err := gockernet.ParsePublish(v)
+			if err != nil {
+				return opt, err
+			}
+			opt.ports = append(opt.ports, pm)
+		case strings.HasPrefix(arg, "--publish="):
+			pm, err := gockernet.ParsePublish(strings.TrimPrefix(arg, "--publish="))
+			if err != nil {
+				return opt, err
+			}
+			opt.ports = append(opt.ports, pm)
 		case arg == "--detach" || arg == "-d":
 			opt.detached = true
 		case arg == "--quiet" || arg == "-q":
@@ -104,6 +123,9 @@ func parseRunFlags(args []string) (runOptions, error) {
 	}
 	if opt.network != "bridge" && opt.network != "none" {
 		return opt, fmt.Errorf("unknown --network mode %q (supported: bridge, none)", opt.network)
+	}
+	if opt.network == "none" && len(opt.ports) > 0 {
+		return opt, fmt.Errorf("cannot publish ports with --network=none")
 	}
 	if opt.name != "" && !validContainerName(opt.name) {
 		return opt, fmt.Errorf("invalid container name %q", opt.name)

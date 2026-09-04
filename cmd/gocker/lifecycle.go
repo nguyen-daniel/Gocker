@@ -56,7 +56,7 @@ func listContainers() {
 			if err := syscall.Kill(ctr.PID, 0); err != nil {
 				status = "exited"
 				state.UpdateStatus(containerID, "exited")
-				gockernet.CleanupContainer(containerID, ctr.VethHost)
+				gockernet.CleanupRuntime(ctr)
 				cgroup.Cleanup(ctr.CgroupPath)
 			}
 		}
@@ -101,7 +101,7 @@ func stopContainer(containerID string) {
 	if err := syscall.Kill(ctr.PID, 0); err != nil {
 		fmt.Printf("Container %s is not running\n", displayID)
 		state.UpdateStatus(ctr.ID, "exited")
-		gockernet.CleanupContainer(ctr.ID, ctr.VethHost)
+		gockernet.CleanupRuntime(ctr)
 		cgroup.Cleanup(ctr.CgroupPath)
 		return
 	}
@@ -120,7 +120,7 @@ func stopContainer(containerID string) {
 		time.Sleep(500 * time.Millisecond)
 	}
 
-	gockernet.CleanupContainer(ctr.ID, ctr.VethHost)
+	gockernet.CleanupRuntime(ctr)
 	cgroup.Cleanup(ctr.CgroupPath)
 
 	if err := state.UpdateStatus(ctr.ID, "stopped"); err != nil {
@@ -155,7 +155,7 @@ func removeContainer(containerID string, force bool) {
 		}
 	}
 
-	gockernet.CleanupContainer(ctr.ID, ctr.VethHost)
+	gockernet.CleanupRuntime(ctr)
 	cgroup.Cleanup(ctr.CgroupPath)
 	overlay.CleanupDirs(ctr.ID)
 
