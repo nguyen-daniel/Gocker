@@ -3,12 +3,8 @@
 package main
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"os"
-	"strings"
-	"time"
 )
 
 func must(err error) {
@@ -22,6 +18,11 @@ func main() {
 	if len(os.Args) < 2 {
 		printUsage()
 		os.Exit(1)
+	}
+
+	if topic, ok := helpRequest(os.Args[1:]); ok {
+		printHelp(topic)
+		os.Exit(0)
 	}
 
 	// Skip root check for "child" (runs inside the container namespaces),
@@ -76,28 +77,6 @@ func main() {
 	}
 }
 
-func printUsage() {
-	fmt.Println("Usage: gocker <command> [options]")
-	fmt.Println()
-	fmt.Println("Commands:")
-	fmt.Println("  run              Run a new container")
-	fmt.Println("  ps               List all containers")
-	fmt.Println("  stop             Stop a running container")
-	fmt.Println("  rm [-f]          Remove a container (-f / --force: SIGKILL if still running)")
-	fmt.Println("  logs [-f]        Show container logs (-f / --follow: stream until exit)")
-	fmt.Println()
-	fmt.Println("Run options:")
-	fmt.Println("  --cpu-limit <limit>         CPU limit (e.g. '1', '0.5', 'max')")
-	fmt.Println("  --memory-limit <limit>      Memory limit (e.g. '512M', '1G', 'max')")
-	fmt.Println("  --volume, -v <host:ctr>     Bind-mount a host path into the container")
-	fmt.Println("  --detach, -d                Run container in background")
-	fmt.Println("  --name <name>               Name for stop/rm/logs/ps (optional)")
-	fmt.Println("  --quiet, -q                 Hide teaching logs; still prints the container ID when detached")
-	fmt.Println("  --network <bridge|none>     Default bridge (veth+NAT). none: loopback only; skip host net setup")
-	fmt.Println("  --rootfs <path>             Path to rootfs directory (default: ./rootfs)")
-	fmt.Println("  --rootless                  Allow unprivileged run (user namespace; network/cgroups may fail)")
-}
-
 // allowUnprivileged reports whether the CLI may run without euid 0.
 // Used to test the user-namespace path in CI without a full rootful stack.
 func allowUnprivileged() bool {
@@ -110,30 +89,4 @@ func allowUnprivileged() bool {
 		}
 	}
 	return false
-}
-
-func generateContainerID() string {
-	randomBytes := make([]byte, 4)
-	rand.Read(randomBytes)
-	return hex.EncodeToString(randomBytes) + fmt.Sprintf("%d", time.Now().UnixNano())
-}
-
-func parseIDAndBoolFlag(args []string, short, long string) (id string, flag bool, err error) {
-	for _, a := range args {
-		if a == short || a == long {
-			flag = true
-			continue
-		}
-		if strings.HasPrefix(a, "-") {
-			return "", false, fmt.Errorf("unknown flag: %s", a)
-		}
-		if id != "" {
-			return "", false, fmt.Errorf("unexpected argument: %s", a)
-		}
-		id = a
-	}
-	if id == "" {
-		return "", false, fmt.Errorf("container ID required")
-	}
-	return id, flag, nil
 }

@@ -69,10 +69,14 @@ func MountVolumes(volumesStr string, merged string) error {
 		}
 
 		if err := syscall.Mount("", mountPoint, "", syscall.MS_PRIVATE|syscall.MS_REC, ""); err != nil {
-			fmt.Fprintf(os.Stderr, "  - Warning: Failed to set mount propagation for %s: %v\n", mountPoint, err)
+			if os.Getenv("GOCKER_QUIET") != "1" {
+				fmt.Fprintf(os.Stderr, "  - Warning: Failed to set mount propagation for %s: %v\n", mountPoint, err)
+			}
 		}
 
-		fmt.Fprintf(os.Stderr, "  - Mounted %s -> %s\n", hostPath, containerPath)
+		if os.Getenv("GOCKER_QUIET") != "1" {
+			fmt.Fprintf(os.Stderr, "  - Mounted %s -> %s\n", hostPath, containerPath)
+		}
 	}
 
 	return nil

@@ -17,7 +17,9 @@ func Create(containerID string) (string, error) {
 	}
 
 	if err := enableControllers("/sys/fs/cgroup/gocker"); err != nil {
-		fmt.Fprintf(os.Stderr, "  - Note: Could not enable cgroup controllers: %v\n", err)
+		if os.Getenv("GOCKER_QUIET") != "1" {
+			fmt.Fprintf(os.Stderr, "  - Note: Could not enable cgroup controllers: %v\n", err)
+		}
 	}
 
 	if err := os.MkdirAll(cgroupPath, 0755); err != nil {

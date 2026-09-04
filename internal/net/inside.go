@@ -70,7 +70,7 @@ func ConfigureInside() error {
 		return fmt.Errorf("no veth interface found after waiting")
 	}
 
-	fmt.Fprintf(os.Stderr, "  - Found container veth interface: %s\n", foundVeth)
+	teachf("  - Found container veth interface: %s\n", foundVeth)
 
 	var containerIP string
 	stateFile := filepath.Join(state.ContainersDir, containerID+".json")
@@ -98,16 +98,16 @@ func ConfigureInside() error {
 	containerCIDR := containerIP + "/24"
 	cmd = exec.Command(ipCmd, "addr", "add", containerCIDR, "dev", foundVeth)
 	if err := cmd.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "  - Note: IP assignment: %v\n", err)
+		teachf("  - Note: IP assignment: %v\n", err)
 	}
 
 	cmd = exec.Command(ipCmd, "route", "add", "default", "via", BridgeIP, "dev", foundVeth)
 	if err := cmd.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "  - Note: Route setup: %v\n", err)
+		teachf("  - Note: Route setup: %v\n", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "  - Container IP: %s\n", containerIP)
-	fmt.Fprintln(os.Stderr, "  - Network configuration complete")
+	teachf("  - Container IP: %s\n", containerIP)
+	teachln("  - Network configuration complete")
 
 	return nil
 }

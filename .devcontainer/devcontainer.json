@@ -1,0 +1,12 @@
+{
+  "name": "Gocker",
+  "image": "mcr.microsoft.com/devcontainers/go:1.21-bookworm",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {
+      "moby": true
+    }
+  },
+  "runArgs": ["--privileged"],
+  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y make iptables iproute2",
+  "remoteUser": "vscode"
+}

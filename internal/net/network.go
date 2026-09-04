@@ -17,6 +17,24 @@ const (
 	ContainerNet = "10.0.0.0/24"
 )
 
+func teachingQuiet() bool {
+	return os.Getenv("GOCKER_QUIET") == "1"
+}
+
+func teachf(format string, args ...interface{}) {
+	if teachingQuiet() {
+		return
+	}
+	fmt.Fprintf(os.Stderr, format, args...)
+}
+
+func teachln(s string) {
+	if teachingQuiet() {
+		return
+	}
+	fmt.Fprintln(os.Stderr, s)
+}
+
 func EnsureBridge() error {
 	if _, err := stdnet.InterfaceByName(BridgeName); err == nil {
 		cmd := exec.Command("ip", "link", "set", BridgeName, "up")
@@ -27,7 +45,7 @@ func EnsureBridge() error {
 		return nil
 	}
 
-	fmt.Fprintln(os.Stderr, "  - Creating bridge gocker0...")
+	teachln("  - Creating bridge gocker0...")
 
 	cmd := exec.Command("ip", "link", "add", "name", BridgeName, "type", "bridge")
 	if err := cmd.Run(); err != nil {
@@ -36,7 +54,7 @@ func EnsureBridge() error {
 
 	cmd = exec.Command("ip", "addr", "add", BridgeCIDR, "dev", BridgeName)
 	if err := cmd.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "  - Note: Bridge IP configuration: %v\n", err)
+		teachf("  - Note: Bridge IP configuration: %v\n", err)
 	}
 
 	cmd = exec.Command("ip", "link", "set", BridgeName, "up")
@@ -46,14 +64,14 @@ func EnsureBridge() error {
 
 	cmd = exec.Command("sysctl", "-w", "net.ipv4.ip_forward=1")
 	if err := cmd.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "  - Warning: Failed to enable IP forwarding: %v\n", err)
+		teachf("  - Warning: Failed to enable IP forwarding: %v\n", err)
 	}
 
 	if err := setupNATRules(); err != nil {
 		return fmt.Errorf("failed to set up NAT: %v", err)
 	}
 
-	fmt.Fprintln(os.Stderr, "  - Bridge gocker0 created and configured")
+	teachln("  - Bridge gocker0 created and configured")
 	return nil
 }
 

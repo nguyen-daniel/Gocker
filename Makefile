@@ -1,4 +1,4 @@
-.PHONY: build test setup run clean bench test-unprivileged lint
+.PHONY: build test setup run clean bench test-unprivileged lint demo
 
 BINARY_NAME=gocker
 ROOTFS_DIR=rootfs
@@ -59,12 +59,18 @@ run: build $(ROOTFS_DIR)
 # Unprivileged unit tests (user-namespace clone flags; no sudo).
 test-unprivileged: build
 	@echo "Running namespace unit tests without sudo..."
-	@GOCKER_ALLOW_UNPRIVILEGED=1 go test -v ./internal/ns ./internal/cgroup ./internal/net ./internal/overlay -run 'TestNamespaceConfig|TestCloneUserNamespace|TestParseCPULimit|TestParseMemoryLimit|TestFindFreeIP|TestMountPoint|TestDropTeachingCaps'
+	@GOCKER_ALLOW_UNPRIVILEGED=1 go test -v ./internal/ns ./internal/cgroup ./internal/net ./internal/overlay ./cmd/gocker -run 'TestNamespaceConfig|TestCloneUserNamespace|TestParseCPULimit|TestParseMemoryLimit|TestFindFreeIP|TestMountPoint|TestDropTeachingCaps|TestParseRunFlags|TestParseIDAndBoolFlag|TestGenerateContainerID|TestShortID|TestHelpRequest|TestIsHelpArg|TestHelpExitsZeroWithoutRoot'
 
 # Startup benchmark vs docker (Linux + sudo). Writes docs/BENCHMARKS.md.
 # Invoke via bash so a missing execute bit (git 100644, Windows checkouts) cannot fail CI.
 bench: build setup
 	@N=$${N:-20} bash ./scripts/bench_startup.sh
+
+# Recruiter walkthrough (Linux + root). Re-execs sudo if needed.
+# Shows hostname/UTS, OverlayFS isolation, pids.max=20, two detached IPs + ps.
+demo: build setup
+	@echo "Running demo (sudo/root required for namespaces, cgroups, overlay, bridge)..."
+	@bash ./scripts/demo.sh
 
 clean:
 	@echo "Cleaning up..."
