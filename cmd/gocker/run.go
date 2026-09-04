@@ -132,6 +132,36 @@ func run() {
 
 	cmd := exec.Command("/proc/self/exe", append([]string{"child"}, opt.command...)...)
 
+	var vethHost, vethPeer, containerIP string
+	var netReadyR, netReadyW *os.File
+	if opt.network == "none" {
+		logv(opt.quiet, "Skipping host network (--network=none)\n")
+	} else {
+		if err := gockernet.EnsureBridge(); err != nil {
+			cgroup.Cleanup(cgroupPath)
+			overlay.CleanupDirs(containerID)
+			must(fmt.Errorf("bridge/NAT setup failed: %v (use --network=none to skip)", err))
+		}
+		containerIP, err = gockernet.AllocateIP(containerID)
+		if err != nil {
+			cgroup.Cleanup(cgroupPath)
+			overlay.CleanupDirs(containerID)
+			must(fmt.Errorf("failed to allocate IP: %v", err))
+		}
+		vethHost, vethPeer = gockernet.VethNames(containerID)
+		os.Setenv("GOCKER_CONTAINER_IP", containerIP)
+		os.Setenv("GOCKER_VETH_PEER", vethPeer)
+		netReadyR, netReadyW, err = os.Pipe()
+		if err != nil {
+			gockernet.ReleaseIP(containerID)
+			cgroup.Cleanup(cgroupPath)
+			overlay.CleanupDirs(containerID)
+			must(err)
+		}
+		cmd.ExtraFiles = []*os.File{netReadyR}
+		os.Setenv("GOCKER_NET_SYNC_FD", "3")
+	}
+
 	// Set up I/O. Detached children must inherit the log *os.File only.
 	// Wiring os.Stdout/os.Stderr (or a MultiWriter) makes exec.Cmd use a pipe
 	// plus a copy goroutine; Wait() then blocks until the child exits, and
@@ -155,9 +185,17 @@ func run() {
 	}
 
 	if err := cmd.Start(); err != nil {
+		if netReadyR != nil {
+			netReadyR.Close()
+			netReadyW.Close()
+		}
+		gockernet.ReleaseIP(containerID)
 		cgroup.Cleanup(cgroupPath)
 		overlay.CleanupDirs(containerID)
 		must(err)
+	}
+	if netReadyR != nil {
+		netReadyR.Close()
 	}
 
 	childPid := cmd.Process.Pid
@@ -180,7 +218,11 @@ func run() {
 	fmt.Fprintf(logWriter, "  - Child PID: %d\n", childPid)
 	logv(opt.quiet, "  - Child PID: %d\n", childPid)
 
-	abort := func(vethHost string, cause error) {
+	abort := func(cause error) {
+		if netReadyW != nil {
+			netReadyW.Close()
+			netReadyW = nil
+		}
 		if cmd.Process != nil {
 			_ = cmd.Process.Kill()
 			_ = cmd.Wait()
@@ -193,20 +235,16 @@ func run() {
 		must(cause)
 	}
 
-	var vethHost, vethPeer, containerIP string
-	if opt.network == "none" {
-		logv(opt.quiet, "Skipping host network (--network=none)\n")
-	} else {
-		if err := gockernet.EnsureBridge(); err != nil {
-			abort("", fmt.Errorf("bridge/NAT setup failed: %v (use --network=none to skip)", err))
-		}
-
+	if opt.network != "none" {
 		logv(opt.quiet, "Setting up network namespace...\n")
-		var netErr error
-		vethHost, vethPeer, containerIP, netErr = gockernet.SetupContainer(containerID, childPid, opt.quiet)
-		if netErr != nil {
-			abort(vethHost, fmt.Errorf("network setup failed: %v (use --network=none to skip)", netErr))
+		if netErr := gockernet.SetupContainer(containerID, childPid, vethHost, vethPeer, containerIP, opt.quiet); netErr != nil {
+			abort(fmt.Errorf("network setup failed: %v (use --network=none to skip)", netErr))
 		}
+		if _, err := netReadyW.Write([]byte{1}); err != nil {
+			abort(fmt.Errorf("network sync: %v", err))
+		}
+		netReadyW.Close()
+		netReadyW = nil
 	}
 
 	ctr := &state.ContainerState{
