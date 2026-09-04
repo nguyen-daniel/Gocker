@@ -869,12 +869,12 @@ func TestTeachPrintsLogs(t *testing.T) {
 
 func testGockerBinary(t *testing.T) string {
 	t.Helper()
-	for _, p := range []string{"./gocker", "../gocker"} {
-		if _, err := os.Stat(p); err == nil {
+	for _, p := range []string{"./gocker", "../gocker", "../../gocker"} {
+		if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() && fi.Mode().Perm()&0o111 != 0 {
 			return p
 		}
 	}
-	t.Skip("gocker binary not found. Run 'make build' first.")
+	t.Skip("executable gocker binary not found. Run 'make build' first.")
 	return ""
 }
 
