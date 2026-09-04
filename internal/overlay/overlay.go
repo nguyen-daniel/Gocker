@@ -60,7 +60,9 @@ func Pivot(newRoot string) error {
 		return fmt.Errorf("unmount old root: %v", err)
 	}
 	if err := os.Remove("/.pivot_old"); err != nil {
-		fmt.Fprintf(os.Stderr, "  - Note: rmdir /.pivot_old: %v\n", err)
+		if os.Getenv("GOCKER_QUIET") != "1" {
+			fmt.Fprintf(os.Stderr, "  - Note: rmdir /.pivot_old: %v\n", err)
+		}
 	}
 	return nil
 }
@@ -117,7 +119,9 @@ func isCharDevice(path string) bool {
 // namespace is already MS_PRIVATE so a bind does not leak onto the host.
 func EnsureDevices(rootfsPath string) error {
 	if err := syscall.Mount("", "/", "", syscall.MS_REC|syscall.MS_PRIVATE, ""); err != nil {
-		fmt.Fprintf(os.Stderr, "  - Note: MS_PRIVATE on /: %v\n", err)
+		if os.Getenv("GOCKER_QUIET") != "1" {
+			fmt.Fprintf(os.Stderr, "  - Note: MS_PRIVATE on /: %v\n", err)
+		}
 	}
 
 	devDir := filepath.Join(rootfsPath, "dev")

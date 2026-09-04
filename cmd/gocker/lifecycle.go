@@ -35,8 +35,10 @@ func listContainers() {
 		return
 	}
 
-	fmt.Printf("%-14s %-16s %-10s %-10s %-16s %-30s %s\n", "CONTAINER ID", "NAME", "STATUS", "PID", "IP", "CREATED", "COMMAND")
-	fmt.Println(strings.Repeat("-", 130))
+	// Laptop-width table (~80 cols). CREATED is omitted so interview terminals
+	// do not wrap a 130-column header.
+	fmt.Printf("%-12s %-10s %-8s %-7s %-15s %s\n", "ID", "NAME", "STATUS", "PID", "IP", "COMMAND")
+	fmt.Println(strings.Repeat("-", 80))
 
 	for _, file := range files {
 		if !strings.HasSuffix(file.Name(), ".json") {
@@ -60,20 +62,17 @@ func listContainers() {
 		}
 
 		command := strings.Join(ctr.Command, " ")
-		if len(command) > 30 {
-			command = command[:27] + "..."
+		if len(command) > 22 {
+			command = command[:19] + "..."
 		}
 
-		displayID := ctr.ID
-		if len(displayID) > 12 {
-			displayID = displayID[:12]
-		}
+		displayID := shortID(ctr.ID)
 
 		name := ctr.Name
 		if name == "" {
 			name = "-"
-		} else if len(name) > 16 {
-			name = name[:13] + "..."
+		} else if len(name) > 10 {
+			name = name[:7] + "..."
 		}
 
 		containerIP := ctr.ContainerIP
@@ -81,8 +80,7 @@ func listContainers() {
 			containerIP = "-"
 		}
 
-		created := ctr.CreatedAt.Format("2006-01-02 15:04:05")
-		fmt.Printf("%-14s %-16s %-10s %-10d %-16s %-30s %s\n", displayID, name, status, ctr.PID, containerIP, created, command)
+		fmt.Printf("%-12s %-10s %-8s %-7d %-15s %s\n", displayID, name, status, ctr.PID, containerIP, command)
 	}
 }
 
@@ -257,9 +255,5 @@ func displayContainer(ctr *state.ContainerState) string {
 	if ctr.Name != "" {
 		return ctr.Name
 	}
-	displayID := ctr.ID
-	if len(displayID) > 12 {
-		displayID = displayID[:12]
-	}
-	return displayID
+	return shortID(ctr.ID)
 }

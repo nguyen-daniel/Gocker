@@ -400,34 +400,6 @@ func TestOverlayWriteIsolation(t *testing.T) {
 	}
 }
 
-func TestParseRunFlags(t *testing.T) {
-	opt, err := parseRunFlags([]string{
-		"-d", "-q", "--name", "web", "--network=none",
-		"-v", "/tmp/data:/data", "--cpu-limit", "0.5", "--memory-limit", "32M",
-		"/bin/busybox", "echo", "hi",
-	})
-	if err != nil {
-		t.Fatalf("parseRunFlags: %v", err)
-	}
-	if !opt.detached || !opt.quiet || opt.name != "web" || opt.network != "none" {
-		t.Errorf("flags: %+v", opt)
-	}
-	if opt.cpuLimit != "0.5" || opt.memoryLimit != "32M" {
-		t.Errorf("limits: cpu=%q mem=%q", opt.cpuLimit, opt.memoryLimit)
-	}
-	if len(opt.volumes) != 1 || opt.volumes[0] != "/tmp/data:/data" {
-		t.Errorf("volumes: %v", opt.volumes)
-	}
-	if strings.Join(opt.command, " ") != "/bin/busybox echo hi" {
-		t.Errorf("command: %v", opt.command)
-	}
-
-	_, err = parseRunFlags([]string{"--network", "host", "true"})
-	if err == nil {
-		t.Fatal("expected error for --network=host")
-	}
-}
-
 func TestUnknownNetworkMode(t *testing.T) {
 	if _, err := os.Stat("./gocker"); os.IsNotExist(err) {
 		t.Skip("gocker binary not found. Run 'make build' first.")
@@ -855,6 +827,92 @@ func TestQuietSuppressesTeachingLogs(t *testing.T) {
 	}
 	if strings.Contains(out, "Creating isolated namespaces") {
 		t.Errorf("--quiet still printed teaching logs:\n%s", out)
+	}
+}
+
+func TestDefaultIsDemoQuiet(t *testing.T) {
+	requireLinuxRuntime(t)
+
+	cmd := gockerCommand("run", "--network=none", "/bin/busybox", "echo", "hello-default")
+	output, err := cmd.CombinedOutput()
+	out := string(output)
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "hello-default") {
+		t.Errorf("missing command output:\n%s", out)
+	}
+	if strings.Contains(out, "Creating isolated namespaces") {
+		t.Errorf("default run printed teaching logs (want --teach for that):\n%s", out)
+	}
+	if !strings.Contains(out, "id ") {
+		t.Errorf("foreground run should print a short id on stderr:\n%s", out)
+	}
+}
+
+func TestTeachPrintsLogs(t *testing.T) {
+	requireLinuxRuntime(t)
+
+	cmd := gockerCommand("run", "--teach", "--network=none", "/bin/busybox", "echo", "hello-teach")
+	output, err := cmd.CombinedOutput()
+	out := string(output)
+	if err != nil {
+		t.Fatalf("run --teach: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "hello-teach") {
+		t.Errorf("missing command output:\n%s", out)
+	}
+	if !strings.Contains(out, "Creating isolated namespaces") {
+		t.Errorf("--teach should print teaching logs:\n%s", out)
+	}
+}
+
+func testGockerBinary(t *testing.T) string {
+	t.Helper()
+	for _, p := range []string{"./gocker", "../gocker"} {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	t.Skip("gocker binary not found. Run 'make build' first.")
+	return ""
+}
+
+func TestHelpExitsZeroWithoutRoot(t *testing.T) {
+	bin := testGockerBinary(t)
+
+	for _, args := range [][]string{
+		{"--help"},
+		{"-h"},
+		{"run", "--help"},
+		{"ps", "--help"},
+		{"stop", "--help"},
+		{"rm", "--help"},
+		{"logs", "--help"},
+	} {
+		cmd := exec.Command(bin, args...)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Errorf("gocker %s: %v\n%s", strings.Join(args, " "), err, out)
+			continue
+		}
+		if !strings.Contains(string(out), "Usage:") {
+			t.Errorf("gocker %s: expected Usage, got:\n%s", strings.Join(args, " "), out)
+		}
+		if strings.Contains(string(out), "Unknown command") {
+			t.Errorf("gocker %s treated as unknown command:\n%s", strings.Join(args, " "), out)
+		}
+		if strings.Contains(string(out), "must be run with sudo") {
+			t.Errorf("gocker %s required root:\n%s", strings.Join(args, " "), out)
+		}
+	}
+
+	out, err := exec.Command(bin, "run", "--help").CombinedOutput()
+	if err != nil {
+		t.Fatalf("run --help: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "--teach") {
+		t.Errorf("run --help should mention --teach:\n%s", out)
 	}
 }
 

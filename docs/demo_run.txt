@@ -1,60 +1,102 @@
-Gocker demo transcript
-======================
+Gocker `make demo` — EXAMPLE transcript
+=======================================
 
-Captured to match what CI already asserts:
-  TestGockerRun              → command inside the jail succeeds
-  TestGockerRunWithHostname  → hostname is "gocker-container"
-  TestOverlayWriteIsolation  → writes stay in per-container OverlayFS upper
+This is labeled expected output for `sudo make demo` / `scripts/demo.sh`.
+It was NOT captured live on the machine that last edited this file (often
+Windows, which cannot run gocker). Placeholders (ids, PIDs, veth, IPs) are
+illustrative, not measured numbers.
 
-Illustrative Linux capture (not live from this Windows machine). Text is the
-messages cmd/gocker / child() print on a successful rootful run: OverlayFS mount
-then pivot_root — not chroot. Placeholders (PIDs, veth names, paths) are
-not measured numbers.
+On Linux, record a real 45s session with:
+  asciinema rec docs/demo.cast
+around `sudo make demo`. Do not check in a fabricated .cast.
 
-Regenerate on Linux (or GitHub Actions ubuntu-latest)
------------------------------------------------------
+What CI already asserts (same behaviors, different commands):
+  TestGockerRunWithHostname   → hostname is "gocker-container"
+  TestOverlayWriteIsolation   → writes stay in per-container OverlayFS upper
+  TestPidsMaxEnforcement      → fork failure at pids.max=20
+  TestMultipleContainers      → two detached containers get different IPs
 
-  git clone https://github.com/nguyen-daniel/Gocker.git
-  cd Gocker
-  make setup
-  make build
-  sudo ./gocker run /bin/busybox echo hello
-  sudo ./gocker run /bin/hostname
+------------------------------------------------------------------------
+Example: bridge/NAT works
+------------------------------------------------------------------------
 
-sudo ./gocker run /bin/busybox echo hello
------------------------------------------
+Gocker demo
+Namespaces + OverlayFS + cgroups v2 + optional veth/NAT
+Binary: /path/to/Gocker/gocker   rootfs: /path/to/Gocker/rootfs
 
-Setting up cgroups v2 for resource limits...
-  - Process limit set to 20
-Running [/bin/busybox echo hello] as PID 1
-Creating isolated namespaces...
-  - UTS namespace (hostname isolation)
-  - PID namespace (process ID isolation)
-  - Mount namespace (filesystem isolation)
-  - Network namespace (network isolation)
-  - Running as root (user namespace not enabled; 4 namespaces)
-  - Child PID: 1234
-Setting up network namespace...
-  - Creating veth pair: veth........ <-> vethc.......
-  - Moving vethc....... into container namespace (IP: 10.0.0.2)
-  - Network setup complete
-Running in child process with PID 1
-Container UID: 0, GID: 0
-Configuring container network...
-  - Found container veth interface: vethc.......
-  - Container IP: 10.0.0.2
-  - Network configuration complete
-Mounting OverlayFS (lower=.../rootfs, dirs=/var/lib/gocker/containers/<id>)...
-Setting hostname to 'gocker-container'...
-Entering OverlayFS jail with pivot_root (/var/lib/gocker/containers/<id>/merged)...
-Mounting proc filesystem...
-Executing command: /bin/busybox [echo hello]
-hello
+======== Network probe (gocker0 bridge + NAT) ========
 
-sudo ./gocker run /bin/hostname
--------------------------------
+Bridge/NAT is up. Detached containers will get different 10.0.0.x addresses.
 
-(same setup lines as above, then)
+======== 1. Hostname / UTS namespace ========
 
-Executing command: /bin/hostname []
+Expect: gocker-container  (host hostname is isolated)
+id a1b2c3d4e5f6
 gocker-container
+
+======== 2. OverlayFS isolation ========
+
+Container A writes /gocker-demo-mark-1234 ; container B must not see it (per-container upper dir).
+--- A ---
+id b2c3d4e5f607
+from-A
+--- B ---
+id c3d4e5f60718
+isolated: B cannot see A's /gocker-demo-mark-1234
+
+======== 3. cgroup pids.max=20 (fork failure) ========
+
+Spawn 25 background sleeps inside one jail. The 21st process should fail to fork.
+id d4e5f6071829
+/bin/busybox: can't fork
+...
+Resource temporarily unavailable
+
+OK: pids.max=20 blocked extra forks (exit 2).
+
+======== 4. Two detached containers + ps ========
+
+Network mode: bridge
+Container started with ID: e5f60718293a
+Container started with ID: f60718293a4b
+
+--- gocker ps ---
+ID           NAME       STATUS   PID     IP              COMMAND
+--------------------------------------------------------------------------------
+e5f60718293a demo-a     running  4321    10.0.0.2        /bin/busybox sleep 60
+f60718293a4b demo-b     running  4328    10.0.0.3        /bin/busybox sleep 60
+
+--- gocker rm -f ---
+Container demo-a removed
+Container demo-b removed
+
+======== Done ========
+Teaching dumps: gocker run --teach ...
+Record 45s on Linux: asciinema rec docs/demo.cast   (around sudo make demo)
+
+------------------------------------------------------------------------
+Example: bridge/NAT fails (honest fallback)
+------------------------------------------------------------------------
+
+======== Network probe (gocker0 bridge + NAT) ========
+
+Bridge/NAT setup failed. Honest fallback: continuing OverlayFS and cgroup
+sections with --network=none (loopback only; no container IPs).
+
+Error: bridge/NAT setup failed: failed to create bridge: ... (use --network=none to skip)
+
+(sections 1–3 are unchanged; they already use --network=none)
+
+======== 4. Two detached containers + ps ========
+
+Network mode: none
+Container started with ID: 112233445566
+Container started with ID: 223344556677
+
+--- gocker ps ---
+ID           NAME       STATUS   PID     IP              COMMAND
+--------------------------------------------------------------------------------
+112233445566 demo-a     running  5102    -               /bin/busybox sleep 60
+223344556677 demo-b     running  5109    -               /bin/busybox sleep 60
+
+IP column is '-' because this run used --network=none (bridge/NAT failed above).

@@ -7,7 +7,34 @@ A small Docker-like runtime in **Go**: isolate a process with Linux namespaces, 
 
 Released under the MIT License (see [LICENSE](LICENSE)).
 
-**Linux only.** Windows/macOS cannot run this (no `clone` namespaces). CI is Ubuntu + sudo.
+## 60 seconds
+
+**Linux + root.** Native Windows/macOS cannot run this (no `clone` namespaces). On Windows use **WSL2 Ubuntu** or [GitHub Codespaces](https://github.com/codespaces) (optional [`.devcontainer`](.devcontainer/devcontainer.json): Ubuntu, Go, Docker-in-Docker for the Alpine export). Docker is **only** used for `docker export` of Alpine — gocker does not drive Docker at runtime.
+
+```bash
+git clone https://github.com/nguyen-daniel/Gocker.git
+cd Gocker
+make setup          # docker export alpine → ./rootfs
+make build
+sudo make demo      # hostname, OverlayFS isolation, pids.max=20, two IPs + ps
+```
+
+`make demo` re-execs sudo if needed and uses `-q` so the payloads stay readable. If bridge/NAT cannot be created, the script says so and continues the overlay/cgroup sections with `--network=none`. Example transcript: [`docs/demo_run.txt`](docs/demo_run.txt) (labeled example — not a live Windows capture).
+
+Record 45s with asciinema on Linux: `asciinema rec docs/demo.cast` around `make demo`. Do not check in a fabricated `.cast`.
+
+By hand (same wow path):
+
+```bash
+sudo ./gocker run -q --network=none /bin/hostname          # gocker-container
+sudo ./gocker run -d --name a /bin/busybox sleep 60
+sudo ./gocker run -d --name b /bin/busybox sleep 60
+sudo ./gocker ps
+sudo ./gocker rm -f a
+sudo ./gocker rm -f b
+```
+
+`gocker --help` and `gocker run --help` work without root. Teaching dumps are off by default; pass `--teach` to see namespace/overlay/cgroup narration.
 
 ## What I built
 
@@ -16,14 +43,12 @@ Released under the MIT License (see [LICENSE](LICENSE)).
 - **cgroups v2**: CPU (`cpu.max`), memory (`memory.max`), **`pids.max=20`**
 - **Network**: `gocker0` bridge, veth pair, NAT masquerade, IPAM on `10.0.0.2`–`10.0.0.254` (253 usable). Bridge/NAT failure **fails the run** unless `--network=none`.
 - **Bind mounts**: `-v host:container` jailed under the overlay merged dir
-- **CLI**: `run`, `ps`, `stop`, `rm`, `logs` with JSON state under `/var/lib/gocker`
+- **CLI**: `run`, `ps`, `stop`, `rm`, `logs` with JSON state under `/var/lib/gocker`. 12-char hex ids; `ps` is laptop-width.
 - **Teaching cap drop**: after `pivot_root`, drop a short list of extra capabilities (not a production profile; no seccomp)
 
 ## How to run
 
 ```bash
-git clone https://github.com/nguyen-daniel/Gocker.git
-cd Gocker
 make setup    # Alpine rootfs via docker export
 make build
 sudo ./gocker run /bin/busybox echo hello
@@ -32,7 +57,7 @@ sudo ./gocker run -d --name web --cpu-limit 0.5 --memory-limit 64M /bin/busybox 
 sudo ./gocker logs -f web
 sudo ./gocker rm -f web
 make test              # sudo integration tests
-make test-unprivileged # user-namespace unit tests, no sudo
+make test-unprivileged # user-namespace + parse tests, no sudo
 make bench             # startup vs docker (Linux); writes docs/startup_bench.json
 ```
 
@@ -41,7 +66,7 @@ make bench             # startup vs docker (Linux); writes docs/startup_bench.js
 | Command | What it does |
 |---------|----------------|
 | `gocker run [options] <cmd>` | Create namespaces, overlay jail, cgroup, optional veth, exec `cmd` |
-| `gocker ps` | List saved containers |
+| `gocker ps` | List saved containers (ID, NAME, STATUS, PID, IP, COMMAND) |
 | `gocker stop <id\|name>` | SIGTERM (then SIGKILL), status `stopped` |
 | `gocker rm [-f] <id\|name>` | Delete overlay + state; refuses a live container unless `-f` |
 | `gocker logs [-f] <id\|name>` | Print the log file; `-f` follows until the container exits |
@@ -54,13 +79,14 @@ make bench             # startup vs docker (Linux); writes docs/startup_bench.js
 | `--memory-limit <size>` | unlimited | cgroup v2 `memory.max` (`512M`, `1G`, …) |
 | `--detach`, `-d` | off | Parent exits; a reaper waits for the child then removes cgroup/veth |
 | `--name <name>` | none | Used by `stop` / `rm` / `logs` / `ps` |
-| `--quiet`, `-q` | off | Hide teaching logs. Detached runs still print `Container started with ID:` |
+| `--quiet`, `-q` | **on** (same as default) | Hide teaching logs. Foreground still prints `id <12-hex>` on stderr; detached still prints `Container started with ID:` |
+| `--teach` | off | Verbose teaching logs (namespaces, overlay, cgroup, veth) |
 | `-v`, `--volume <host:container>` | none | Bind-mount. Container path is jailed under the overlay (no `Join` escape) |
 | `--network <mode>` | `bridge` | `bridge`: veth + NAT. `none`: loopback only, skip host net. **Unknown modes fail.** If bridge/NAT setup fails, the run fails unless `none`. |
 | `--rootfs <path>` | `./rootfs` | OverlayFS lower dir |
 | `--rootless` | off | User namespace; network/cgroups may fail |
 
-`--network=none` and `--network none` are both accepted.
+`--network=none` and `--network none` are both accepted. `--help` / `-h` on any command exits 0 without treating the flag as a jail argv.
 
 ## Proof
 
@@ -73,7 +99,7 @@ make bench             # startup vs docker (Linux); writes docs/startup_bench.js
 | Detached survives parent exit | `TestDetachedSurvivesParentExit` |
 | Reaper cleans cgroup/veth/status | `TestDetachedReaperCleansUp` |
 | `stop` / `rm` / `logs` | `TestStopSetsStopped`, `TestRmRefusesRunningThenDeletes`, `TestLogsContents` |
-| `echo hello` + hostname | [`docs/demo_run.txt`](docs/demo_run.txt) |
+| Labeled demo transcript | [`docs/demo_run.txt`](docs/demo_run.txt) |
 | `pids.max=20` | `TestPidsMaxEnforcement` (Linux) |
 | CPU / memory cgroup files + load | `TestCPUAndMemoryLimitsApplied`, `TestCPULimitEnforcement`, `TestMemoryLimitEnforcement` |
 | Teaching cap drop | `TestDropTeachingCaps`, `TestTeachingCapsDroppedInContainer` |
@@ -85,7 +111,7 @@ make bench             # startup vs docker (Linux); writes docs/startup_bench.js
 - Requires **Linux + root** for the default path (namespaces, cgroups, overlay mounts, iptables).
 - User namespace is **not** on the rootful default path — do not claim “5 namespaces” unless you ran `--rootless`.
 - Startup times vs Docker are **hardware-specific**. This repo does not ship a `<100ms` number; run `make bench` on Linux and quote the JSON (CI artifact `startup-bench`).
-- Not a production runtime: no image store, no seccomp, no port publish. The capability drop is a **teaching demo** (a few extra caps after `pivot_root`; `CAP_SYS_ADMIN` is kept). It is not Docker’s default profile.
+- Not a production runtime: no image store, no seccomp, no port publish, no `exec`. The capability drop is a **teaching demo** (a few extra caps after `pivot_root`; `CAP_SYS_ADMIN` is kept). It is not Docker’s default profile.
 - CPU throttle proof uses `cpu.max` plus `cpu.stat` (`nr_throttled` / usage). On a noisy or idle host the counter can lag; the test always checks the cgroup file and only fails if usage looks like an unthrottled core.
 - `--network=none` is the opt-out if you cannot create `gocker0` / NAT. Default `bridge` no longer leaves a container `running` with a broken network.
 
@@ -99,9 +125,10 @@ make bench             # startup vs docker (Linux); writes docs/startup_bench.js
 - `internal/net` — bridge, veth, NAT, IPAM
 - `internal/overlay` — OverlayFS, `pivot_root`, volume path jail + bind-mount
 - `internal/state` — JSON container state under `/var/lib/gocker`
+- `scripts/demo.sh` — `make demo` walkthrough
 - `scripts/bench_startup.sh` — gocker vs `docker run --rm alpine true`
 - `docs/BENCHMARKS.md` — how to reproduce benches
-- `docs/demo_run.txt` — `echo hello` + hostname transcript
+- `docs/demo_run.txt` — labeled example `make demo` transcript
 - `.github/workflows/main.yml` — Ubuntu CI (`gofmt`, `go vet`, tests)
 
 ## Prerequisites

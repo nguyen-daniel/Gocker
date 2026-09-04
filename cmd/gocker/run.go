@@ -12,7 +12,6 @@ import (
 	"strings"
 	"syscall"
 	"time"
-	"unicode"
 
 	"gocker/internal/cgroup"
 	gockernet "gocker/internal/net"
@@ -21,115 +20,6 @@ import (
 	"gocker/internal/state"
 )
 
-type runOptions struct {
-	cpuLimit    string
-	memoryLimit string
-	rootfsPath  string
-	network     string
-	name        string
-	volumes     []string
-	detached    bool
-	quiet       bool
-	command     []string
-}
-
-func parseRunFlags(args []string) (runOptions, error) {
-	var opt runOptions
-	opt.network = "bridge"
-	var rest []string
-
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		needVal := func(flag string) (string, error) {
-			if i+1 >= len(args) {
-				return "", fmt.Errorf("%s requires a value", flag)
-			}
-			i++
-			return args[i], nil
-		}
-		switch {
-		case arg == "--cpu-limit":
-			v, err := needVal(arg)
-			if err != nil {
-				return opt, err
-			}
-			opt.cpuLimit = v
-		case arg == "--memory-limit":
-			v, err := needVal(arg)
-			if err != nil {
-				return opt, err
-			}
-			opt.memoryLimit = v
-		case arg == "--volume" || arg == "-v":
-			v, err := needVal(arg)
-			if err != nil {
-				return opt, err
-			}
-			opt.volumes = append(opt.volumes, v)
-		case arg == "--detach" || arg == "-d":
-			opt.detached = true
-		case arg == "--quiet" || arg == "-q":
-			opt.quiet = true
-		case arg == "--rootless":
-			// Consumed so it is not treated as the container command.
-			// Root check is handled in main() via allowUnprivileged().
-		case arg == "--rootfs":
-			v, err := needVal(arg)
-			if err != nil {
-				return opt, err
-			}
-			opt.rootfsPath = v
-		case arg == "--name":
-			v, err := needVal(arg)
-			if err != nil {
-				return opt, err
-			}
-			opt.name = v
-		case arg == "--network":
-			v, err := needVal(arg)
-			if err != nil {
-				return opt, err
-			}
-			opt.network = v
-		case strings.HasPrefix(arg, "--network="):
-			opt.network = strings.TrimPrefix(arg, "--network=")
-		case arg == "--":
-			rest = append(rest, args[i+1:]...)
-			i = len(args)
-		default:
-			rest = append(rest, arg)
-		}
-	}
-
-	opt.command = rest
-	if opt.network == "" {
-		opt.network = "bridge"
-	}
-	if opt.network != "bridge" && opt.network != "none" {
-		return opt, fmt.Errorf("unknown --network mode %q (supported: bridge, none)", opt.network)
-	}
-	if opt.name != "" && !validContainerName(opt.name) {
-		return opt, fmt.Errorf("invalid container name %q", opt.name)
-	}
-	return opt, nil
-}
-
-func validContainerName(name string) bool {
-	if name == "" || len(name) > 64 {
-		return false
-	}
-	for i, r := range name {
-		ok := unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '-' || r == '.'
-		if !ok {
-			return false
-		}
-		if i == 0 && (r == '.' || r == '-') {
-			return false
-		}
-	}
-	return true
-}
-
 func logv(quiet bool, format string, args ...interface{}) {
 	if quiet {
 		return
@@ -137,18 +27,37 @@ func logv(quiet bool, format string, args ...interface{}) {
 	fmt.Fprintf(os.Stderr, format, args...)
 }
 
+func printContainerID(containerID string, detached, quiet bool) {
+	sid := shortID(containerID)
+	if detached {
+		fmt.Printf("Container started with ID: %s\n", sid)
+		if !quiet {
+			fmt.Printf("Use 'gocker logs %s' to view logs\n", sid)
+		}
+		return
+	}
+	fmt.Fprintf(os.Stderr, "id %s\n", sid)
+}
+
 func run() {
 	opt, err := parseRunFlags(os.Args[2:])
 	must(err)
 
+	if opt.help {
+		printRunUsage()
+		os.Exit(0)
+	}
+
 	if len(opt.command) == 0 {
 		fmt.Println("Error: command required")
-		fmt.Println("Usage: gocker run [options] <command> [args...]")
+		printRunUsage()
 		os.Exit(1)
 	}
 
 	if opt.quiet {
 		os.Setenv("GOCKER_QUIET", "1")
+	} else {
+		os.Unsetenv("GOCKER_QUIET")
 	}
 	os.Setenv("GOCKER_NETWORK", opt.network)
 
@@ -268,7 +177,8 @@ func run() {
 		parentOutput = logWriter
 	}
 
-	fmt.Fprintf(parentOutput, "  - Child PID: %d\n", childPid)
+	fmt.Fprintf(logWriter, "  - Child PID: %d\n", childPid)
+	logv(opt.quiet, "  - Child PID: %d\n", childPid)
 
 	abort := func(vethHost string, cause error) {
 		if cmd.Process != nil {
@@ -293,7 +203,7 @@ func run() {
 
 		logv(opt.quiet, "Setting up network namespace...\n")
 		var netErr error
-		vethHost, vethPeer, containerIP, netErr = gockernet.SetupContainer(containerID, childPid, opt.detached || opt.quiet)
+		vethHost, vethPeer, containerIP, netErr = gockernet.SetupContainer(containerID, childPid, opt.quiet)
 		if netErr != nil {
 			abort(vethHost, fmt.Errorf("network setup failed: %v (use --network=none to skip)", netErr))
 		}
@@ -318,11 +228,9 @@ func run() {
 		fmt.Fprintf(parentOutput, "Warning: Failed to save container state: %v\n", err)
 	}
 
+	printContainerID(containerID, opt.detached, opt.quiet)
+
 	if opt.detached {
-		fmt.Printf("Container started with ID: %s\n", containerID)
-		if !opt.quiet {
-			fmt.Printf("Use 'gocker logs %s' to view logs\n", containerID)
-		}
 		if err := startDetachedReaper(containerID); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: Failed to start detached reaper: %v\n", err)
 		}
