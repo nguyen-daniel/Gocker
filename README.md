@@ -41,7 +41,7 @@ sudo ./gocker rm -f b
 - **4 namespaces by default** (rootful): UTS, PID, mount, network. **User namespace is optional** (`--rootless` / `GOCKER_ALLOW_UNPRIVILEGED=1`) with uid/gid maps.
 - **OverlayFS + `pivot_root`**: shared Alpine lower dir, per-container `upper`/`work` under `/var/lib/gocker/containers/<id>/`
 - **cgroups v2**: CPU (`cpu.max`), memory (`memory.max`), **`pids.max=20`**
-- **Network**: `gocker0` bridge, veth pair, NAT masquerade, IPAM on `10.0.0.2`–`10.0.0.254` (253 usable). Bridge/NAT failure **fails the run** unless `--network=none`.
+- **Network**: `gocker0` bridge, veth pair, NAT masquerade, IPAM on `10.0.0.2`–`10.0.0.254` (253 usable). Link/addr/route/veth use netlink (`golang.org/x/sys/unix`); iptables stays for MASQUERADE/FORWARD. Bridge/NAT failure **fails the run** unless `--network=none`.
 - **Bind mounts**: `-v host:container` jailed under the overlay merged dir
 - **CLI**: `run`, `ps`, `stop`, `rm`, `logs` with JSON state under `/var/lib/gocker`. 12-char hex ids; `ps` is laptop-width.
 - **Teaching cap drop**: after `pivot_root`, drop a short list of extra capabilities (not a production profile; no seccomp)
@@ -122,7 +122,7 @@ make bench             # startup vs docker (Linux); writes docs/startup_bench.js
 - `cmd/gocker` — CLI (`run`, `ps`, `stop`, `rm`, `logs`) and integration tests
 - `internal/ns` — clone flags (UTS/PID/mount/net; optional user ns) and teaching cap drop
 - `internal/cgroup` — cgroups v2 CPU/memory/`pids.max`
-- `internal/net` — bridge, veth, NAT, IPAM
+- `internal/net` — netlink bridge/veth/addr/route, iptables NAT, IPAM
 - `internal/overlay` — OverlayFS, `pivot_root`, volume path jail + bind-mount
 - `internal/state` — JSON container state under `/var/lib/gocker`
 - `scripts/demo.sh` — `make demo` walkthrough

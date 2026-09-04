@@ -3,6 +3,7 @@
 package net
 
 import (
+	"bufio"
 	"fmt"
 	stdnet "net"
 	"os"
@@ -37,8 +38,7 @@ func teachln(s string) {
 
 func EnsureBridge() error {
 	if _, err := stdnet.InterfaceByName(BridgeName); err == nil {
-		cmd := exec.Command("ip", "link", "set", BridgeName, "up")
-		cmd.Run()
+		_ = LinkSetUp(BridgeName)
 		if err := setupNATRules(); err != nil {
 			return fmt.Errorf("failed to set up NAT: %v", err)
 		}
@@ -47,26 +47,18 @@ func EnsureBridge() error {
 
 	teachln("  - Creating bridge gocker0...")
 
-	cmd := exec.Command("ip", "link", "add", "name", BridgeName, "type", "bridge")
-	if err := cmd.Run(); err != nil {
+	if err := LinkAddBridge(BridgeName); err != nil {
 		return fmt.Errorf("failed to create bridge: %v", err)
 	}
-
-	cmd = exec.Command("ip", "addr", "add", BridgeCIDR, "dev", BridgeName)
-	if err := cmd.Run(); err != nil {
+	if err := AddrAdd(BridgeName, BridgeIP, 24); err != nil {
 		teachf("  - Note: Bridge IP configuration: %v\n", err)
 	}
-
-	cmd = exec.Command("ip", "link", "set", BridgeName, "up")
-	if err := cmd.Run(); err != nil {
+	if err := LinkSetUp(BridgeName); err != nil {
 		return fmt.Errorf("failed to bring up bridge: %v", err)
 	}
-
-	cmd = exec.Command("sysctl", "-w", "net.ipv4.ip_forward=1")
-	if err := cmd.Run(); err != nil {
+	if err := os.WriteFile("/proc/sys/net/ipv4/ip_forward", []byte("1\n"), 0644); err != nil {
 		teachf("  - Warning: Failed to enable IP forwarding: %v\n", err)
 	}
-
 	if err := setupNATRules(); err != nil {
 		return fmt.Errorf("failed to set up NAT: %v", err)
 	}
@@ -118,71 +110,64 @@ func teardownNATRules() {
 	exec.Command("iptables", "-D", "FORWARD", "-i", defaultInterface, "-o", BridgeName, "-j", "ACCEPT").Run()
 }
 
-func SetupContainer(containerID string, childPid int, quiet bool) (vethHost, vethPeer, containerIP string, err error) {
-	containerIP, err = AllocateIP(containerID)
-	if err != nil {
-		return "", "", "", fmt.Errorf("failed to allocate IP: %v", err)
-	}
-
+func VethNames(containerID string) (vethHost, vethPeer string) {
 	shortID := containerID
 	if len(shortID) > 8 {
 		shortID = shortID[:8]
 	}
 	vethHost = fmt.Sprintf("veth%s", shortID)
 	vethPeer = fmt.Sprintf("vethc%s", shortID)
-
 	if len(vethHost) > 15 {
 		vethHost = vethHost[:15]
 	}
 	if len(vethPeer) > 15 {
 		vethPeer = vethPeer[:15]
 	}
+	return vethHost, vethPeer
+}
 
+func SetupContainer(containerID string, childPid int, vethHost, vethPeer, containerIP string, quiet bool) error {
 	if !quiet {
 		fmt.Fprintf(os.Stderr, "  - Creating veth pair: %s <-> %s\n", vethHost, vethPeer)
 	}
-	cmd := exec.Command("ip", "link", "add", vethHost, "type", "veth", "peer", "name", vethPeer)
-	if err := cmd.Run(); err != nil {
-		ReleaseIP(containerID)
-		return "", "", "", fmt.Errorf("failed to create veth pair: %v", err)
+	if err := LinkAddVeth(vethHost, vethPeer); err != nil {
+		return fmt.Errorf("failed to create veth pair: %v", err)
 	}
 
-	cmd = exec.Command("ip", "link", "set", vethHost, "master", BridgeName)
-	if err := cmd.Run(); err != nil {
+	if err := LinkSetMaster(vethHost, BridgeName); err != nil {
 		CleanupVeth(vethHost)
-		ReleaseIP(containerID)
-		return "", "", "", fmt.Errorf("failed to attach veth to bridge: %v", err)
+		return fmt.Errorf("failed to attach veth to bridge: %v", err)
 	}
-
-	cmd = exec.Command("ip", "link", "set", vethHost, "up")
-	if err := cmd.Run(); err != nil {
+	if err := LinkSetUp(vethHost); err != nil {
 		CleanupVeth(vethHost)
-		ReleaseIP(containerID)
-		return "", "", "", fmt.Errorf("failed to bring up host veth: %v", err)
+		return fmt.Errorf("failed to bring up host veth: %v", err)
 	}
 
 	if !quiet {
 		fmt.Fprintf(os.Stderr, "  - Moving %s into container namespace (IP: %s)\n", vethPeer, containerIP)
 	}
-	netnsPath := fmt.Sprintf("/proc/%d/ns/net", childPid)
-	cmd = exec.Command("ip", "link", "set", vethPeer, "netns", netnsPath)
-	if err := cmd.Run(); err != nil {
+	nsFile, err := os.Open(fmt.Sprintf("/proc/%d/ns/net", childPid))
+	if err != nil {
 		CleanupVeth(vethHost)
-		ReleaseIP(containerID)
-		return "", "", "", fmt.Errorf("failed to move veth into container namespace: %v", err)
+		return fmt.Errorf("failed to open container netns: %v", err)
+	}
+	defer nsFile.Close()
+	if err := LinkSetNsFd(vethPeer, int(nsFile.Fd())); err != nil {
+		CleanupVeth(vethHost)
+		return fmt.Errorf("failed to move veth into container namespace: %v", err)
 	}
 
 	if !quiet {
 		fmt.Fprintln(os.Stderr, "  - Network setup complete")
 	}
-	return vethHost, vethPeer, containerIP, nil
+	return nil
 }
 
 func CleanupVeth(vethHost string) {
 	if vethHost == "" {
 		return
 	}
-	exec.Command("ip", "link", "delete", vethHost).Run()
+	_ = LinkDel(vethHost)
 }
 
 func CleanupContainer(containerID, vethHost string) {
@@ -191,23 +176,27 @@ func CleanupContainer(containerID, vethHost string) {
 }
 
 func getDefaultInterface() (string, error) {
-	cmd := exec.Command("ip", "route", "show", "default")
-	output, err := cmd.Output()
+	f, err := os.Open("/proc/net/route")
 	if err != nil {
 		return "", err
 	}
+	defer f.Close()
 
-	lines := strings.Split(string(output), "\n")
-	for _, line := range lines {
-		if strings.Contains(line, "default") && strings.Contains(line, "dev") {
-			parts := strings.Fields(line)
-			for i, part := range parts {
-				if part == "dev" && i+1 < len(parts) {
-					return parts[i+1], nil
-				}
-			}
+	sc := bufio.NewScanner(f)
+	if !sc.Scan() {
+		return "", fmt.Errorf("empty /proc/net/route")
+	}
+	for sc.Scan() {
+		fields := strings.Fields(sc.Text())
+		if len(fields) < 2 {
+			continue
+		}
+		if fields[1] == "00000000" && fields[0] != "" && fields[0] != "*" {
+			return fields[0], nil
 		}
 	}
-
+	if err := sc.Err(); err != nil {
+		return "", err
+	}
 	return "", fmt.Errorf("could not find default interface")
 }

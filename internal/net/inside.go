@@ -3,111 +3,75 @@
 package net
 
 import (
-	"encoding/json"
 	"fmt"
+	"io"
 	"os"
-	"os/exec"
-	"path/filepath"
-	"strings"
-	"time"
-
-	"gocker/internal/state"
+	"strconv"
 )
 
-// ConfigureInside sets up the network interface inside the container.
-// It waits for the parent to set up the veth and reads the IP from the state file.
+// ConfigureInside sets up lo (always) and the container veth (bridge mode).
+// The parent moves the veth into this netns and writes one byte on the sync
+// fd before the child configures the named interface — no poll loop.
 func ConfigureInside() error {
-	containerID := os.Getenv("GOCKER_CONTAINER_ID")
-	if containerID == "" {
-		return fmt.Errorf("GOCKER_CONTAINER_ID not set")
+	if err := LinkSetUp("lo"); err != nil {
+		teachf("  - Note: loopback up: %v\n", err)
 	}
 
-	ipCmd := "/usr/bin/ip"
-	if _, err := os.Stat(ipCmd); os.IsNotExist(err) {
-		ipCmd = "/sbin/ip"
-		if _, err := os.Stat(ipCmd); os.IsNotExist(err) {
-			ipCmd = "ip"
-		}
-	}
-
-	cmd := exec.Command(ipCmd, "link", "set", "lo", "up")
-	cmd.Run()
-
-	// Isolated net ns with loopback only. Skip the veth wait (up to 5s).
 	if os.Getenv("GOCKER_NETWORK") == "none" {
 		return nil
 	}
 
-	var foundVeth string
-	for i := 0; i < 50; i++ {
-		show := exec.Command(ipCmd, "link", "show", "type", "veth")
-		output, err := show.Output()
-		if err == nil {
-			lines := strings.Split(string(output), "\n")
-			for _, line := range lines {
-				if strings.Contains(line, "veth") {
-					parts := strings.Fields(line)
-					if len(parts) >= 2 {
-						name := strings.TrimSuffix(parts[1], ":")
-						if idx := strings.Index(name, "@"); idx != -1 {
-							name = name[:idx]
-						}
-						if strings.HasPrefix(name, "veth") {
-							foundVeth = name
-							break
-						}
-					}
-				}
-			}
-		}
-		if foundVeth != "" {
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
+	if err := waitNetSync(); err != nil {
+		return err
 	}
 
-	if foundVeth == "" {
-		return fmt.Errorf("no veth interface found after waiting")
+	foundVeth := os.Getenv("GOCKER_VETH_PEER")
+	containerIP := os.Getenv("GOCKER_CONTAINER_IP")
+	if foundVeth == "" || containerIP == "" {
+		return fmt.Errorf("missing GOCKER_VETH_PEER or GOCKER_CONTAINER_IP")
 	}
 
 	teachf("  - Found container veth interface: %s\n", foundVeth)
 
-	var containerIP string
-	stateFile := filepath.Join(state.ContainersDir, containerID+".json")
-	for i := 0; i < 50; i++ {
-		data, err := os.ReadFile(stateFile)
-		if err == nil {
-			var ctr state.ContainerState
-			if json.Unmarshal(data, &ctr) == nil && ctr.ContainerIP != "" {
-				containerIP = ctr.ContainerIP
-				break
-			}
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	if containerIP == "" {
-		return fmt.Errorf("container IP not found in state file")
-	}
-
-	cmd = exec.Command(ipCmd, "link", "set", foundVeth, "up")
-	if err := cmd.Run(); err != nil {
+	if err := LinkSetUp(foundVeth); err != nil {
 		return fmt.Errorf("failed to bring up container veth: %v", err)
 	}
-
-	containerCIDR := containerIP + "/24"
-	cmd = exec.Command(ipCmd, "addr", "add", containerCIDR, "dev", foundVeth)
-	if err := cmd.Run(); err != nil {
+	if err := AddrAdd(foundVeth, containerIP, 24); err != nil {
 		teachf("  - Note: IP assignment: %v\n", err)
 	}
-
-	cmd = exec.Command(ipCmd, "route", "add", "default", "via", BridgeIP, "dev", foundVeth)
-	if err := cmd.Run(); err != nil {
+	if err := RouteAddDefault(foundVeth, BridgeIP); err != nil {
 		teachf("  - Note: Route setup: %v\n", err)
 	}
 
 	teachf("  - Container IP: %s\n", containerIP)
 	teachln("  - Network configuration complete")
-
 	return nil
+}
+
+func waitNetSync() error {
+	fdStr := os.Getenv("GOCKER_NET_SYNC_FD")
+	if fdStr == "" {
+		return fmt.Errorf("GOCKER_NET_SYNC_FD not set")
+	}
+	fd, err := strconv.Atoi(fdStr)
+	if err != nil {
+		return fmt.Errorf("GOCKER_NET_SYNC_FD: %v", err)
+	}
+	f := os.NewFile(uintptr(fd), "net-sync")
+	if f == nil {
+		return fmt.Errorf("net-sync fd %d", fd)
+	}
+	defer f.Close()
+	buf := make([]byte, 1)
+	n, err := f.Read(buf)
+	if n == 1 {
+		return nil
+	}
+	if err == io.EOF {
+		return fmt.Errorf("network setup aborted")
+	}
+	if err != nil {
+		return fmt.Errorf("wait for veth: %v", err)
+	}
+	return fmt.Errorf("wait for veth: short read")
 }
