@@ -45,7 +45,7 @@ jobs:
         make setup
     
     - name: Unprivileged user-namespace tests
-      # Optional user-namespace path (not the rootful 4-ns default).
+      # Optional user-namespace path (not the rootful 5-ns default).
       run: make test-unprivileged
 
     - name: Run tests

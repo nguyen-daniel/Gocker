@@ -9,8 +9,8 @@ import (
 )
 
 // Teaching-only capability drop. This is not a production profile:
-// no seccomp, no no-new-privs, CAP_SYS_ADMIN is kept (mount/pivot still
-// need it if something runs after this point; we drop after pivot).
+// CAP_SYS_ADMIN is kept (see honesty in README). Seccomp + no_new_privs
+// are applied separately after pivot_root (InstallTeachingSeccomp).
 //
 // We clear a handful of "you do not need these in a container" caps from
 // the bounding set (PR_CAPBSET_DROP) and from the effective/permitted/

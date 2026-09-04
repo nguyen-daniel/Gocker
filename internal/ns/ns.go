@@ -8,11 +8,11 @@ import (
 )
 
 // SysProcAttr builds clone flags for the container child.
-// Default (rootful) path: 4 namespaces — UTS, PID, mount, network.
+// Default (rootful) path: 5 namespaces — UTS, PID, mount, network, IPC.
 // User namespace is optional: enabled when not root, or --rootless /
 // GOCKER_ALLOW_UNPRIVILEGED=1, with uid/gid maps (container 0 -> host euid).
 func SysProcAttr(includeUser bool) *syscall.SysProcAttr {
-	flags := syscall.CLONE_NEWUTS | syscall.CLONE_NEWPID | syscall.CLONE_NEWNS | syscall.CLONE_NEWNET
+	flags := syscall.CLONE_NEWUTS | syscall.CLONE_NEWPID | syscall.CLONE_NEWNS | syscall.CLONE_NEWNET | syscall.CLONE_NEWIPC
 	attr := &syscall.SysProcAttr{Cloneflags: uintptr(flags)}
 	if includeUser {
 		attr.Cloneflags |= syscall.CLONE_NEWUSER

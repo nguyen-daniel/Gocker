@@ -11,7 +11,7 @@ func isHelpArg(s string) bool {
 
 func isUserCommand(s string) bool {
 	switch s {
-	case "run", "ps", "stop", "rm", "logs":
+	case "run", "ps", "stop", "rm", "logs", "exec":
 		return true
 	}
 	return false
@@ -20,6 +20,7 @@ func isUserCommand(s string) bool {
 // helpRequest reports whether argv (os.Args[1:]) asked for help.
 // topic is "" for global help, or a command name.
 // --help after the jail command (gocker run /bin/busybox --help) is not help.
+// --help after the exec container id is the exec'd argv, not gocker help.
 func helpRequest(args []string) (topic string, ok bool) {
 	if len(args) == 0 {
 		return "", false
@@ -39,6 +40,10 @@ func helpRequest(args []string) (topic string, ok bool) {
 	case "run":
 		if runHelpRequested(rest) {
 			return "run", true
+		}
+	case "exec":
+		if execHelpRequested(rest) {
+			return "exec", true
 		}
 	case "ps", "stop", "rm", "logs":
 		for _, a := range rest {
@@ -76,6 +81,22 @@ func runHelpRequested(args []string) bool {
 	return false
 }
 
+func execHelpRequested(args []string) bool {
+	for _, a := range args {
+		if isHelpArg(a) {
+			return true
+		}
+		if a == "--" {
+			return false
+		}
+		if !strings.HasPrefix(a, "-") {
+			// First positional is the container id; later --help is argv.
+			return false
+		}
+	}
+	return false
+}
+
 func printHelp(topic string) {
 	switch topic {
 	case "run":
@@ -88,6 +109,8 @@ func printHelp(topic string) {
 		fmt.Print(rmUsage)
 	case "logs":
 		fmt.Print(logsUsage)
+	case "exec":
+		fmt.Print(execUsage)
 	default:
 		printUsage()
 	}
@@ -109,6 +132,7 @@ Commands:
   stop             Stop a running container
   rm [-f]          Remove a container
   logs [-f]        Show container logs
+  exec             Run a command in a running container
 
 Run 'gocker <command> --help' for flags.
 Linux + root required (except --help). Try: sudo make demo
@@ -120,7 +144,7 @@ const runUsage = `Usage: gocker run [options] <command> [args...]
   --memory-limit <size>    Memory limit (e.g. '512M', '1G', 'max')
   --volume, -v <host:ctr>  Bind-mount a host path into the container
   --detach, -d             Run container in background
-  --name <name>            Name for stop/rm/logs/ps (optional)
+  --name <name>            Name for stop/rm/logs/exec/ps (optional)
   --quiet, -q              Hide teaching logs (default)
   --teach                  Verbose teaching logs (namespaces, overlay, cgroup)
   --network <bridge|none>  Default bridge (veth+NAT). none: loopback only
@@ -149,4 +173,10 @@ Delete overlay + state. Refuses a live container unless -f / --force (SIGKILL).
 const logsUsage = `Usage: gocker logs [-f|--follow] <container-id|name>
 
 Print the container log file. -f / --follow streams until the container exits.
+`
+
+const execUsage = `Usage: gocker exec <container-id|name> <command> [args...]
+
+Join the running container's namespaces (UTS, PID, mount, net, IPC) and cgroup.
+Non-TTY only. The container must be running.
 `
