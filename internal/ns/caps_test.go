@@ -28,8 +28,13 @@ func TestDropTeachingCaps(t *testing.T) {
 
 	cmd := exec.Command(os.Args[0], "-test.run=^TestDropTeachingCaps$")
 	cmd.Env = append(os.Environ(), "GOCKER_TEST_DROP_CAPS=1")
-	out, err := cmd.Output()
+	out, err := cmd.CombinedOutput()
 	if err != nil {
+		// PR_CAPBSET_DROP needs CAP_SETPCAP; GitHub-hosted runners (and
+		// other unprivileged environments) reject it with EPERM.
+		if strings.Contains(strings.ToLower(string(out)), "operation not permitted") {
+			t.Skipf("dropping capabilities is not permitted in this environment:\n%s", out)
+		}
 		t.Fatalf("subprocess: %v\n%s", err, out)
 	}
 

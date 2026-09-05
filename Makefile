@@ -9,6 +9,7 @@ ALPINE_IMAGE=alpine:latest
 build:
 	@echo "Building $(BINARY_NAME)..."
 	@go build -o $(BINARY_NAME) ./cmd/gocker
+	@chmod +x $(BINARY_NAME)
 	@echo "Build complete: $(BINARY_NAME)"
 
 # Format and vet. Used by CI; no extra linters (keep the zero-dependency bar).
