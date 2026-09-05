@@ -17,21 +17,75 @@ import (
 	"gocker/internal/state"
 )
 
+func findRepoRoot() (string, error) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", fmt.Errorf("go.mod not found from %s", dir)
+		}
+		dir = parent
+	}
+}
+
+func gockerBinaryPath() (string, error) {
+	root, err := findRepoRoot()
+	if err != nil {
+		return "", err
+	}
+	p := filepath.Join(root, "gocker")
+	fi, err := os.Stat(p)
+	if err != nil {
+		return "", err
+	}
+	if !fi.Mode().IsRegular() {
+		return "", fmt.Errorf("%s is not a regular file", p)
+	}
+	if fi.Mode().Perm()&0o111 == 0 {
+		if err := os.Chmod(p, fi.Mode()|0o111); err != nil {
+			return "", fmt.Errorf("chmod +x %s: %w", p, err)
+		}
+	}
+	return p, nil
+}
+
+func rootfsDir() (string, error) {
+	root, err := findRepoRoot()
+	if err != nil {
+		return "", err
+	}
+	p := filepath.Join(root, "rootfs")
+	if _, err := os.Stat(p); err != nil {
+		return "", err
+	}
+	return p, nil
+}
+
 func requireLinuxRuntime(t *testing.T) {
 	t.Helper()
-	if _, err := os.Stat("./gocker"); os.IsNotExist(err) {
+	if _, err := gockerBinaryPath(); err != nil {
 		t.Skip("gocker binary not found. Run 'make build' first.")
 	}
-	if _, err := os.Stat("./rootfs"); os.IsNotExist(err) {
+	if _, err := rootfsDir(); err != nil {
 		t.Skip("rootfs directory not found. Run 'make setup' first.")
 	}
 }
 
 func gockerCommand(args ...string) *exec.Cmd {
-	if os.Geteuid() == 0 {
-		return exec.Command("./gocker", args...)
+	bin, err := gockerBinaryPath()
+	if err != nil {
+		bin = "./gocker"
 	}
-	return exec.Command("sudo", append([]string{"./gocker"}, args...)...)
+	if os.Geteuid() == 0 {
+		return exec.Command(bin, args...)
+	}
+	return exec.Command("sudo", append([]string{bin}, args...)...)
 }
 
 func parseStartedContainerID(output []byte) string {
@@ -100,14 +154,14 @@ func parseCPUStat(data []byte) (usageUsec, nrThrottled int64) {
 }
 
 func TestGockerRun(t *testing.T) {
-	binaryPath := "./gocker"
-	if _, err := os.Stat(binaryPath); os.IsNotExist(err) {
-		t.Fatalf("gocker binary not found at %s. Run 'make build' first.", binaryPath)
+	binaryPath, err := gockerBinaryPath()
+	if err != nil {
+		t.Fatalf("gocker binary not found. Run 'make build' first.")
 	}
 
-	rootfsPath := "./rootfs"
-	if _, err := os.Stat(rootfsPath); os.IsNotExist(err) {
-		t.Fatalf("rootfs directory not found at %s. Run 'make setup' first.", rootfsPath)
+	rootfsPath, err := rootfsDir()
+	if err != nil {
+		t.Fatalf("rootfs directory not found. Run 'make setup' first.")
 	}
 
 	busyboxPath := filepath.Join(rootfsPath, "bin/busybox")
@@ -124,20 +178,19 @@ func TestGockerRun(t *testing.T) {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	err := cmd.Run()
+	err = cmd.Run()
 	if err != nil {
 		t.Fatalf("Gocker failed to execute /bin/busybox true in container: %v", err)
 	}
 }
 
 func TestGockerRunWithHostname(t *testing.T) {
-	binaryPath := "./gocker"
-	if _, err := os.Stat(binaryPath); os.IsNotExist(err) {
+	binaryPath, err := gockerBinaryPath()
+	if err != nil {
 		t.Skip("gocker binary not found. Run 'make build' first.")
 	}
 
-	rootfsPath := "./rootfs"
-	if _, err := os.Stat(rootfsPath); os.IsNotExist(err) {
+	if _, err := rootfsDir(); err != nil {
 		t.Skip("rootfs directory not found. Run 'make setup' first.")
 	}
 
@@ -289,11 +342,15 @@ func TestMultipleContainers(t *testing.T) {
 }
 
 func TestPidsMaxEnforcement(t *testing.T) {
-	binaryPath := "./gocker"
-	if _, err := os.Stat(binaryPath); os.IsNotExist(err) {
+	binaryPath, err := gockerBinaryPath()
+	if err != nil {
 		t.Skip("gocker binary not found. Run 'make build' first.")
 	}
-	if _, err := os.Stat("./rootfs/bin/busybox"); os.IsNotExist(err) {
+	rootfsPath, err := rootfsDir()
+	if err != nil {
+		t.Skip("rootfs not set up")
+	}
+	if _, err := os.Stat(filepath.Join(rootfsPath, "bin/busybox")); os.IsNotExist(err) {
 		t.Skip("rootfs not set up")
 	}
 
@@ -368,7 +425,11 @@ func TestOverlayWriteIsolation(t *testing.T) {
 	requireLinuxRuntime(t)
 
 	marker := fmt.Sprintf("gocker-overlay-isol-%d", time.Now().UnixNano())
-	lowerPath := filepath.Join("rootfs", marker)
+	rootfsPath, err := rootfsDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lowerPath := filepath.Join(rootfsPath, marker)
 	_ = os.Remove(lowerPath)
 
 	writeCmd := gockerCommand("run", "--network=none", "/bin/busybox", "sh", "-c", "echo from-a > /"+marker)
@@ -401,10 +462,8 @@ func TestOverlayWriteIsolation(t *testing.T) {
 }
 
 func TestUnknownNetworkMode(t *testing.T) {
-	if _, err := os.Stat("./gocker"); os.IsNotExist(err) {
-		t.Skip("gocker binary not found. Run 'make build' first.")
-	}
-	cmd := exec.Command("./gocker", "run", "--rootless", "--network", "host", "/bin/true")
+	bin := testGockerBinary(t)
+	cmd := exec.Command(bin, "run", "--rootless", "--network", "host", "/bin/true")
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		t.Fatalf("expected failure for --network=host; got:\n%s", out)
@@ -869,13 +928,11 @@ func TestTeachPrintsLogs(t *testing.T) {
 
 func testGockerBinary(t *testing.T) string {
 	t.Helper()
-	for _, p := range []string{"./gocker", "../gocker"} {
-		if _, err := os.Stat(p); err == nil {
-			return p
-		}
+	bin, err := gockerBinaryPath()
+	if err != nil {
+		t.Skip("executable gocker binary not found. Run 'make build' first.")
 	}
-	t.Skip("gocker binary not found. Run 'make build' first.")
-	return ""
+	return bin
 }
 
 func TestHelpExitsZeroWithoutRoot(t *testing.T) {
